@@ -42,7 +42,7 @@ class MarketDataLoader:
         adj_close = raw_data['Adj Close']
         
         # Calculate daily returns
-        returns = adj_close.pct_change()
+        returns = adj_close.pct_change(fill_method=None)
         
         # Drop only the first row (which is NaN due to pct_change)
         returns = returns.iloc[1:]
