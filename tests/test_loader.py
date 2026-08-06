@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
 import pandas as pd
-from simulator.loader import MarketDataLoader
 from unittest.mock import patch
+
+from simulator.loader import MarketDataLoader
 
 
 def test_loader_initialization():
