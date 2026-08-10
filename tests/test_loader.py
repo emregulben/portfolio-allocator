@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from simulator.loader import MarketDataLoader
 
-
 def test_loader_initialization():
     """Validates that parameters are correctly assigned to the instance."""
     loader = MarketDataLoader(

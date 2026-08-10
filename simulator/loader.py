@@ -1,7 +1,6 @@
 import pandas as pd
 import yfinance as yf
 
-
 class MarketDataLoader:
     """
     Downloads market data from Yahoo Finance and calculates daily returns.
