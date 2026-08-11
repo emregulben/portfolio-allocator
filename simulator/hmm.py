@@ -127,3 +127,17 @@ class HybridJumpsHMM:
                 counter += 1
                 
         return states
+    
+    def decode_states(self, states: np.ndarray) -> np.ndarray:
+        """
+        Decodes a sequence of states into continuous daily returns using Student-t emissions.
+        """
+        if len(self.state_means) == 0 or len(self.state_stds) == 0:
+            raise ValueError("Model must be fitted before decoding states.")
+            
+        # Draw standard Student-t random variables (df = 5) for each day
+        z = np.random.standard_t(df=5, size=len(states))
+        
+        # Vectorized scaling and shifting using state-conditional parameters
+        simulated_returns = self.state_means[states] + self.state_stds[states] * z
+        return simulated_returns
