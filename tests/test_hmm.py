@@ -157,3 +157,40 @@ def test_hmm_simulate_always_jump():
     allowed_states = {0, 1, 8, 9}
     for state in states[1:]:
         assert state in allowed_states
+    
+    
+def test_hmm_decode_unfitted_raises_error():
+    """
+    Validates that decoding states on an unfitted model raises a ValueError.
+    """
+    model = HybridJumpsHMM(n_states=10)
+    dummy_states = np.array([0, 1, 2])
+    with pytest.raises(ValueError, match="Model must be fitted before decoding states."):
+        model.decode_states(dummy_states)
+
+
+def test_hmm_decode_exact_values():
+    """
+    Validates that decoded returns match the state-conditional mean,
+    standard deviation, and Student-t random noise.
+    """
+    # 1. Fit the exact 2-state model
+    returns = pd.Series([-0.02, 0.01, 0.0, 0.03, -0.01])
+    model = HybridJumpsHMM(n_states=2)
+    model.fit(returns)
+    
+    # 2. Define target states to decode (State 0 and State 1)
+    states = np.array([0, 1])
+    
+    # 3. Generate expected noise Z using the same seed
+    np.random.seed(42)
+    expected_z = np.random.standard_t(df=5, size=2)
+    
+    # 4. Decode using the same seed
+    np.random.seed(42)
+    decoded_returns = model.decode_states(states)
+    
+    # 5. Calculate expected returns: Mean + Std * Z
+    expected_returns = model.state_means[states] + model.state_stds[states] * expected_z
+    
+    assert np.allclose(decoded_returns, expected_returns)
