@@ -100,3 +100,60 @@ def test_hmm_fit_exact_values():
     # 6. Assert stationary distribution (spending 50% time in each state)
     expected_pi_bar = np.array([0.5, 0.5])
     assert np.allclose(model.pi_bar, expected_pi_bar)
+    
+    
+def test_hmm_simulate_unfitted_raises_error():
+    """
+    Validates that simulating states on an unfitted model raises a ValueError.
+    """
+    model = HybridJumpsHMM(n_states=10)
+    with pytest.raises(ValueError, match="Model must be fitted before simulating states."):
+        model.simulate_states(n_steps=100, epsilon=0.01, lambd=10)
+
+
+def test_hmm_simulate_normal_transitions():
+    """
+    Validates normal HMM transitions without jumps (epsilon = 0.0)
+    using the alternating exact values model.
+    """
+    # 1. Fit the exact model where state 0 -> 1 and 1 -> 0 always
+    returns = pd.Series([-0.02, 0.01, 0.0, 0.03, -0.01])
+    model = HybridJumpsHMM(n_states=2)
+    model.fit(returns)
+    
+    # 2. Simulate 10 steps with jump probability epsilon = 0.0
+    np.random.seed(42)
+    states = model.simulate_states(n_steps=10, epsilon=0.0, lambd=0)
+    
+    # 3. Check shape and correct values
+    assert states.shape == (10,)
+    
+    # Verify that the sequence strictly alternates: e.g. [0, 1, 0, 1, 0, 1...]
+    # np.diff should be either +1 or -1 on every step
+    assert np.all(np.abs(np.diff(states)) == 1)
+
+
+def test_hmm_simulate_always_jump():
+    """
+    Validates that when epsilon = 1.0, the simulator only draws states
+    from the designated tail states.
+    """
+    # 1. Fit HMM on dummy data
+    dummy_returns = pd.Series(np.random.normal(0, 0.01, 100))
+    model = HybridJumpsHMM(n_states=10)
+    model.fit(dummy_returns)
+    
+    # 2. Simulate 200 steps with constant jump probability epsilon = 1.0
+    # With n_tail = 2: s_bottom = [0, 1], s_top = [8, 9]
+    n_tail = 2
+    states = model.simulate_states(
+        n_steps=200, 
+        epsilon=1.0, 
+        lambd=50, 
+        n_tail=n_tail
+    )
+    
+    # 3. Verify that every state from Day 2 onwards is in [0, 1, 8, 9]
+    allowed_states = {0, 1, 8, 9}
+    for state in states[1:]:
+        assert state in allowed_states
