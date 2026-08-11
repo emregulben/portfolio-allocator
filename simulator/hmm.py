@@ -77,3 +77,53 @@ class HybridJumpsHMM:
             else:
                 self.state_means[k - 1] = global_mean
                 self.state_stds[k - 1] = global_std
+        
+    def simulate_states(
+        self,
+        n_steps: int,
+        epsilon: float,
+        lambd: float,
+        n_tail: int = 5,
+        negative_jump_prob: float = 0.52
+    ) -> np.ndarray:
+        """
+        Simulates a hidden state sequence of length n_steps using the Poisson jump mechanism.
+        """
+        if len(self.T_cumsum) == 0 or len(self.pi_bar) == 0:
+            raise ValueError("Model must be fitted before simulating states.")
+            
+        states = np.zeros(n_steps, dtype=int)
+        
+        # Define 0-indexed tail states
+        s_bottom = np.arange(n_tail)
+        s_top = np.arange(self.n_states - n_tail, self.n_states)
+        
+        # Sample initial state from stationary distribution
+        states[0] = np.searchsorted(np.cumsum(self.pi_bar), np.random.rand())
+        
+        counter = 1
+        while counter < n_steps:
+            if np.random.rand() < epsilon:
+                # Sample jump duration from Poisson distribution
+                k_jump = np.random.poisson(lambd)
+                k_jump = min(k_jump, n_steps - counter)
+                
+                if k_jump > 0:
+                    # Decide if each jump step is bottom or top tail
+                    w = np.random.rand(k_jump)
+                    is_bottom = w < negative_jump_prob
+                    
+                    # Uniformly sample from the selected tail states
+                    states[counter : counter + k_jump] = np.where(
+                        is_bottom,
+                        np.random.choice(s_bottom, size=k_jump),
+                        np.random.choice(s_top, size=k_jump)
+                    )
+                    counter += k_jump
+            else:
+                # Normal transition using cumulative probabilities
+                prev_state = states[counter - 1]
+                states[counter] = np.searchsorted(self.T_cumsum[prev_state], np.random.rand())
+                counter += 1
+                
+        return states
