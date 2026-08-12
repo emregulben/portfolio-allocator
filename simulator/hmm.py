@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import laplace
+from statsmodels.tsa.stattools import acf
+from typing import Optional
 
 class HybridJumpsHMM:
     """
@@ -141,3 +143,75 @@ class HybridJumpsHMM:
         # Vectorized scaling and shifting using state-conditional parameters
         simulated_returns = self.state_means[states] + self.state_stds[states] * z
         return simulated_returns
+    
+    def grid_search(
+        self,
+        returns: pd.Series,
+        epsilon_grid: Optional[list[float]] = None,
+        lambda_grid: Optional[list[float]] = None,
+        max_lag: int = 252,
+        n_paths: int = 200,
+        w_K: float = 0.20
+    ) -> tuple[float, float]:
+        """
+        Performs multi-objective grid search over jump parameters (epsilon, lambda)
+        to minimize discrepancy in absolute ACF and kurtosis (Algorithm 4).
+        """
+        if len(self.boundaries) == 0:
+            raise ValueError("Model must be fitted before running grid search.")
+            
+        ret_data = returns.dropna().to_numpy()
+        n_steps = len(ret_data)
+        
+        # Default search grids from the paper
+        if epsilon_grid is None:
+            epsilon_grid = [1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3, 5e-3, 1e-2, 2.5e-2]
+        if lambda_grid is None:
+            lambda_grid = [10, 25, 40, 55, 70, 85, 100, 130, 160]
+            
+        # 1. Compute observed statistics (ACF of absolute returns & Kurtosis)
+        acf_obs = acf(np.abs(ret_data), nlags=max_lag, fft=True)[1:]
+        var_obs = np.var(ret_data)
+        k_obs = (np.mean((ret_data - np.mean(ret_data)) ** 4) / (var_obs ** 2) - 3.0) if var_obs > 0 else 0.0
+        
+        min_error = float("inf")
+        best_eps = epsilon_grid[0]
+        best_lambd = lambda_grid[0]
+        
+        # 2. Sweep over grid combinations
+        for eps in epsilon_grid:
+            for lambd in lambda_grid:
+                acf_sum = np.zeros(max_lag)
+                k_sum = 0.0
+                
+                # Run N simulated paths per grid point
+                for _ in range(n_paths):
+                    sim_states = self.simulate_states(n_steps=n_steps, epsilon=eps, lambd=lambd)
+                    sim_returns = self.decode_states(sim_states)
+                    
+                    # Accumulate ACF of simulated absolute returns
+                    acf_sim_path = acf(np.abs(sim_returns), nlags=max_lag, fft=True)[1:]
+                    acf_sum += acf_sim_path
+                    
+                    # Accumulate simulated kurtosis
+                    var_sim = np.var(sim_returns)
+                    k_sim = (np.mean((sim_returns - np.mean(sim_returns)) ** 4) / (var_sim ** 2) - 3.0) if var_sim > 0 else 0.0
+                    k_sum += k_sim
+                    
+                # Ensemble averages
+                acf_sim_avg = acf_sum / n_paths
+                k_sim_avg = k_sum / n_paths
+                
+                # 3. Calculate multi-objective error J (Equation 3)
+                error = np.sum((acf_obs - acf_sim_avg) ** 2) + w_K * ((k_obs - k_sim_avg) ** 2)
+                
+                if error < min_error:
+                    min_error = error
+                    best_eps = eps
+                    best_lambd = lambd
+                    
+        # Save best parameters to the instance
+        self.epsilon = best_eps
+        self.lambd = best_lambd
+        
+        return best_eps, best_lambd
