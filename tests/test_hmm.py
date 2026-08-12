@@ -194,3 +194,42 @@ def test_hmm_decode_exact_values():
     expected_returns = model.state_means[states] + model.state_stds[states] * expected_z
     
     assert np.allclose(decoded_returns, expected_returns)
+    
+def test_hmm_grid_search_unfitted_raises_error():
+    """
+    Validates that running grid search on an unfitted model raises a ValueError.
+    """
+    model = HybridJumpsHMM(n_states=10)
+    dummy_returns = pd.Series([0.01, -0.02, 0.005])
+    with pytest.raises(ValueError, match="Model must be fitted before running grid search."):
+        model.grid_search(dummy_returns)
+
+
+def test_hmm_grid_search_execution():
+    """
+    Validates that grid_search completes successfully and sets best epsilon and lambda.
+    """
+    # 1. Fit model on dummy data
+    np.random.seed(42)
+    dummy_returns = pd.Series(np.random.normal(loc=0.0002, scale=0.01, size=200))
+    model = HybridJumpsHMM(n_states=5)
+    model.fit(dummy_returns)
+    
+    # 2. Run grid search with a fast, custom 1x1 grid for testing
+    custom_eps = [0.01]
+    custom_lambd = [10.0]
+    
+    best_eps, best_lambd = model.grid_search(
+        returns=dummy_returns,
+        epsilon_grid=custom_eps,
+        lambda_grid=custom_lambd,
+        max_lag=5,
+        n_paths=2,
+        w_K=0.20
+    )
+    
+    # 3. Assert best parameters are set on the instance
+    assert best_eps == 0.01
+    assert best_lambd == 10
+    assert model.epsilon == 0.01
+    assert model.lambd == 10
