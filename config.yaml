@@ -1,7 +1,14 @@
 data:
   tickers:
-    - AAPL
-    - MSFT
-    - TSLA
-  start_date: "2016-01-01"
-  end_date: "2026-08-01"
+    - SPY
+  start_date: "2014-01-01"
+  end_date: "2024-01-01"
+
+hmm:
+  n_states: 100
+  grid_search:
+    max_lag: 252
+    n_paths: 200
+    w_K: 0.20
+  simulation:
+    n_steps: 2520  # 10 years of daily returns
