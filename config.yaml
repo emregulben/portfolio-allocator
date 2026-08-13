@@ -1,6 +1,16 @@
 data:
-  tickers:
-    - SPY
+  market_ticker: SPY
+  stock_tickers:
+    - AAPL
+    - MSFT
+    - NVDA
+    - JPM
+    - JNJ
+    - PG
+    - AMZN
+    - XOM
+    - UNH
+    - HD
   start_date: "2014-01-01"
   end_date: "2024-01-01"
 

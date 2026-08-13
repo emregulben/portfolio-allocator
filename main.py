@@ -1,10 +1,12 @@
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import yaml
 
 from simulator.loader import MarketDataLoader
 from simulator.logger import setup_logger
 from simulator.hmm import HybridJumpsHMM
+from simulator.single_index import SingleIndexModel
 
 logger = setup_logger(__name__)
 
@@ -18,71 +20,78 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(file)
 
 def main() -> None:
-    logger.info("Initializing HMM-WJ pipeline...")
+    logger.info("Initializing Multi-Asset HMM-SIM pipeline...")
     
-    # 1. Load configuration directly
+    # 1. Load configuration
     config = load_config("config.yaml")
     data_cfg = config["data"]
     hmm_cfg = config["hmm"]
     grid_cfg = hmm_cfg["grid_search"]
     sim_cfg = hmm_cfg["simulation"]
     
-    # 2. Fetch historical data
-    tickers = data_cfg["tickers"]
-    logger.info(f"Loading market data for: {tickers}")
+    market_ticker = data_cfg["market_ticker"]
+    stock_tickers = data_cfg["stock_tickers"]
+    all_tickers = [market_ticker] + stock_tickers
     
+    # 2. Fetch historical market benchmark and stock data
+    logger.info(f"Fetching data for market index '{market_ticker}' and {len(stock_tickers)} stock tickers...")
     loader = MarketDataLoader(
-        tickers=tickers,
+        tickers=all_tickers,
         start_date=data_cfg["start_date"],
         end_date=data_cfg["end_date"]
     )
     
     market_data = loader.fetch_data()
-    ticker = tickers[0]
-    returns = market_data[ticker].dropna()
-    logger.info(f"Loaded {len(returns)} historical returns for {ticker}.")
+    market_returns = market_data[market_ticker]
+    raw_stock_returns = market_data[stock_tickers]
     
-    # 3. Fit HMM model
+    stock_returns = raw_stock_returns.to_frame() if isinstance(raw_stock_returns, pd.Series) else raw_stock_returns
+    logger.info(f"Loaded {len(market_returns)} historical daily return rows.")
+    
+    # 3. Fit HMM model on market benchmark
     n_states = hmm_cfg["n_states"]
-    logger.info(f"Fitting HybridJumpsHMM with {n_states} states...")
-    model = HybridJumpsHMM(n_states=n_states)
-    model.fit(returns)
+    logger.info(f"Fitting HybridJumpsHMM on market benchmark ({market_ticker}) with {n_states} states...")
+    hmm_model = HybridJumpsHMM(n_states=n_states)
+    hmm_model.fit(market_returns)
     
-    # 4. Calibrate jump parameters via grid search
-    logger.info("Running multi-objective grid search for jump parameters...")
-    best_eps, best_lambd = model.grid_search(
-        returns=returns,
+    # 4. Calibrate market jump parameters via grid search
+    logger.info(f"Running multi-objective grid search for {market_ticker} jump parameters...")
+    best_eps, best_lambd = hmm_model.grid_search(
+        returns=market_returns,
         max_lag=grid_cfg["max_lag"],
         n_paths=grid_cfg["n_paths"],
         w_K=grid_cfg["w_K"]
     )
-    logger.info(f"Optimal parameters found: epsilon* = {best_eps}, lambda* = {best_lambd}")
+    logger.info(f"Optimal market parameters: epsilon* = {best_eps}, lambda* = {best_lambd}")
     
-    # 5. Simulate synthetic returns
+    # 5. Fit Single-Index Model for all stock tickers against market benchmark
+    logger.info(f"Fitting SingleIndexModel for {len(stock_tickers)} stocks against {market_ticker}...")
+    sim_model = SingleIndexModel(tickers=stock_tickers)
+    sim_model.fit(stock_returns, market_returns)
+    logger.info(f"Estimated Stock Betas (Min: {np.min(sim_model.betas):.2f}, Mean: {np.mean(sim_model.betas):.2f}, Max: {np.max(sim_model.betas):.2f})")
+    
+    # 6. Simulate synthetic market path and project across all stocks
     n_steps = sim_cfg["n_steps"]
-    logger.info(f"Simulating {n_steps} synthetic trading days...")
+    logger.info(f"Simulating {n_steps} trading days for {len(stock_tickers)} stocks...")
     
-    sim_states = model.simulate_states(
+    sim_market_states = hmm_model.simulate_states(
         n_steps=n_steps,
         epsilon=best_eps,
         lambd=best_lambd
     )
-    sim_returns = model.decode_states(sim_states)
+    sim_market_returns = hmm_model.decode_states(sim_market_states)
     
-    # 6. Calculate comparative summary statistics
-    ret_data = returns.to_numpy()
-    hist_mean, sim_mean = np.mean(ret_data), np.mean(sim_returns)
-    hist_std, sim_std = np.std(ret_data), np.std(sim_returns)
+    # Project market returns to multi-asset return DataFrame
+    sim_stock_returns_df = sim_model.simulate(market_sim_returns=sim_market_returns, random_seed=42)
     
-    hist_var, sim_var = np.var(ret_data), np.var(sim_returns)
-    hist_kurt = (np.mean((ret_data - hist_mean)**4) / (hist_var**2) - 3.0) if hist_var > 0 else 0.0
-    sim_kurt = (np.mean((sim_returns - sim_mean)**4) / (sim_var**2) - 3.0) if sim_var > 0 else 0.0
+    # 7. Log summary statistics
+    hist_avg_vol = np.mean(np.std(stock_returns.to_numpy(), axis=0))
+    sim_avg_vol = np.mean(np.std(sim_stock_returns_df.to_numpy(), axis=0))
     
-    logger.info("--- COMPARATIVE STATISTICAL SUMMARY ---")
-    logger.info(f"Mean Return    | Hist: {hist_mean:.6f} | Sim: {sim_mean:.6f}")
-    logger.info(f"Volatility (Std)| Hist: {hist_std:.6f} | Sim: {sim_std:.6f}")
-    logger.info(f"Kurtosis (Tails)| Hist: {hist_kurt:.4f}   | Sim: {sim_kurt:.4f}")
-    logger.info("Pipeline execution complete!")
+    logger.info("--- MULTI-ASSET STATISTICAL SUMMARY ---")
+    logger.info(f"Synthetic Return Matrix Shape : {sim_stock_returns_df.shape} (Days x Stocks)")
+    logger.info(f"Average Stock Volatility      | Hist: {hist_avg_vol:.6f} | Sim: {sim_avg_vol:.6f}")
+    logger.info("Multi-Asset pipeline execution complete!")
 
 if __name__ == "__main__":
     main()
