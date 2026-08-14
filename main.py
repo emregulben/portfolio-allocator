@@ -7,6 +7,7 @@ from simulator.loader import MarketDataLoader
 from simulator.logger import setup_logger
 from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
+from experts.markowitz import MarkowitzExpert
 
 logger = setup_logger(__name__)
 
@@ -91,6 +92,28 @@ def main() -> None:
     logger.info("--- MULTI-ASSET STATISTICAL SUMMARY ---")
     logger.info(f"Synthetic Return Matrix Shape : {sim_stock_returns_df.shape} (Days x Stocks)")
     logger.info(f"Average Stock Volatility      | Hist: {hist_avg_vol:.6f} | Sim: {sim_avg_vol:.6f}")
+
+    # 8. Generate target weights using Markowitz expert
+    expert_cfg = config["expert"]
+    logger.info("Running rolling Markowitz expert to generate portfolio labels...")
+    
+    expert = MarkowitzExpert(
+        risk_aversion=expert_cfg["risk_aversion"],
+        rolling_window=expert_cfg["rolling_window"],
+        max_weight=expert_cfg["max_weight"],
+        annual_risk_free_rate=expert_cfg["annual_risk_free_rate"]
+    )
+    
+    target_weights = expert.generate_labels(sim_stock_returns_df)
+    
+    logger.info(f"Generated Markowitz labels matrix shape: {target_weights.shape} (Days x Stocks)")
+    # Sanity-check the very first day of weights
+    first_day_weights = target_weights.iloc[0]
+    logger.info("--- Sanity Check (First Day Weights) ---")
+    logger.info(f"Sum of weights : {first_day_weights.sum():.4f} (Should be 1.0)")
+    logger.info(f"Max weight     : {first_day_weights.max():.4f} (Should be <= {expert_cfg['max_weight']})")
+    logger.info(f"Min weight     : {first_day_weights.min():.4f} (Should be >= 0.0)")
+
     logger.info("Multi-Asset pipeline execution complete!")
 
 if __name__ == "__main__":
