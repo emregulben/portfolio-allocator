@@ -1,24 +1,41 @@
+# ---------------------------------------------------------
+# 1. Historical Data Configuration
+# ---------------------------------------------------------
 data:
+  # The broad market benchmark used to train the HMM crash regimes
   market_ticker: SPY
-  stock_tickers:
-    - AAPL
-    - MSFT
-    - NVDA
-    - JPM
-    - JNJ
-    - PG
-    - AMZN
-    - XOM
-    - UNH
-    - HD
+  # The individual assets that make up the portfolio allocation universe
+  stock_tickers: [AAPL, MSFT, NVDA, JPM, JNJ, PG, AMZN, XOM, UNH, HD]
+  # 10-year in-sample training window (reserves 2024+ for out-of-sample testing)
   start_date: "2014-01-01"
   end_date: "2024-01-01"
 
+# ---------------------------------------------------------
+# 2. HMM Market Simulator Configuration
+# ---------------------------------------------------------
 hmm:
+  # Number of discrete Laplace quantile states for the market return distribution
   n_states: 100
   grid_search:
+    # Lags used to match the Autocorrelation Function (ACF) decay
     max_lag: 252
+    # Number of synthetic paths simulated to average the objective function
     n_paths: 200
+    # Weight applied to the Kurtosis penalty vs the ACF penalty in the grid search
     w_K: 0.20
   simulation:
-    n_steps: 2520  # 10 years of daily returns
+    # Number of trading days to simulate (2520 days = exactly 10 trading years)
+    n_steps: 2520
+
+# ---------------------------------------------------------
+# 3. Markowitz Expert Configuration (Ground Truth Labels)
+# ---------------------------------------------------------
+expert:
+  # Number of historical days the expert looks backward to estimate Returns and Risk
+  rolling_window: 60
+  # Gamma parameter: Higher values heavily penalize risk; 0 maximizes return only
+  risk_aversion: 1.0
+  # Maximum percentage allowed in a single stock (e.g., 0.20 = 20% cap)
+  max_weight: 0.20
+  # Baseline annual return rate for cash (e.g., 0.04 = 4% Treasury yield)
+  annual_risk_free_rate: 0.0
