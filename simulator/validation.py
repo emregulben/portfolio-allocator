@@ -44,9 +44,11 @@ class MetricsEvaluator:
         Intuition: Strict measure of similarity between probability curves. 0 = identical, 1 = no overlap.
         """
         # 1. Create a shared evaluation grid spanning both datasets
-        min_val = min(np.min(hist), np.min(sim))
-        max_val = max(np.max(hist), np.max(sim))
-        grid = np.linspace(min_val, max_val, 1000)
+        # We MUST add a buffer to capture the KDE Gaussian tails, otherwise the integral < 1.0
+        buffer = 3.0 * max(np.std(hist), np.std(sim))
+        min_val = min(np.min(hist), np.min(sim)) - buffer
+        max_val = max(np.max(hist), np.max(sim)) + buffer
+        grid = np.linspace(min_val, max_val, 2000)
         
         # 2. Fit smooth probability curves and evaluate them on the grid
         kde_hist = gaussian_kde(hist)(grid)
@@ -57,7 +59,7 @@ class MetricsEvaluator:
         bc = np.sum(np.sqrt(kde_hist * kde_sim)) * dx
         
         # Guard against minor floating point errors exceeding 1.0
-        return np.sqrt(1.0 - min(bc, 1.0))
+        return float(np.sqrt(1.0 - min(bc, 1.0)))
 
     @staticmethod
     def calculate_kurtosis_error(hist: np.ndarray, sim: np.ndarray) -> float:
