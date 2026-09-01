@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 class MLPDenoiser(nn.Module):
@@ -51,3 +52,97 @@ class MLPDenoiser(nn.Module):
         
         # Pass it through the MLP to predict the noise!
         return self.net(x)
+
+class PortDiff(nn.Module):
+    # Type hints to keep the IDE's static checker happy
+    betas: torch.Tensor
+    alphas_cumprod: torch.Tensor
+    sqrt_alphas_cumprod: torch.Tensor
+    sqrt_one_minus_alphas_cumprod: torch.Tensor
+    
+    def __init__(self, denoiser, num_timesteps=100):
+        """
+        The core Diffusion Model that wraps the MLPDenoiser.
+        
+        Args:
+            denoiser (nn.Module): The neural network that predicts the noise.
+            num_timesteps (int): The total number of steps to add/remove noise (T).
+        """
+        super().__init__()
+        self.denoiser = denoiser
+        self.num_timesteps = num_timesteps
+        
+        # 1. Beta Schedule: Controls how much noise to add at each step.
+        # We use a simple linear schedule from 0.0001 (tiny noise) to 0.02 (high noise).
+        betas = torch.linspace(0.0001, 0.02, num_timesteps)
+        
+        # 2. Alphas: Math shortcuts needed for the diffusion formulas
+        alphas = 1.0 - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        
+        # We register these as "buffers" so PyTorch saves them but doesn't try to train them.
+        self.register_buffer("betas", betas)
+        self.register_buffer("alphas_cumprod", alphas_cumprod)
+        self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
+        self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
+        
+    def forward(self, state, action_clean):
+        """
+        TRAINING ONLY: Calculates the loss by adding noise and asking the denoiser to guess it.
+        """
+        batch_size = state.shape[0]
+        
+        # 1. Pick a random timestep 't' for every sample in the batch
+        t = torch.randint(0, self.num_timesteps, (batch_size,), device=state.device).long()
+        
+        # 2. Generate pure random Gaussian noise
+        noise = torch.randn_like(action_clean)
+        
+        # 3. Add the noise to the clean expert weights based on the schedule at timestep 't'
+        sqrt_alphas_t = self.sqrt_alphas_cumprod[t].view(-1, 1)
+        sqrt_one_minus_alphas_t = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1)
+        action_noisy = sqrt_alphas_t * action_clean + sqrt_one_minus_alphas_t * noise
+        
+        # 4. Ask the MLPDenoiser to guess the noise we just added
+        predicted_noise = self.denoiser(state, action_noisy, t.unsqueeze(-1).float())
+        
+        # 5. Return the Mean Squared Error (MSE) between the true noise and the guessed noise
+        loss = F.mse_loss(predicted_noise, noise)
+        return loss
+    
+    @torch.no_grad()
+    def sample(self, state):
+        """
+        INFERENCE ONLY (Real World): Starts with pure noise and denoises it step-by-step to get portfolio weights.
+        """
+        batch_size = state.shape[0]
+        # We find out how many assets there are by looking at the last layer of the denoiser
+        action_dim = self.denoiser.net[-1].out_features
+        
+        # 1. Start with completely random pure Gaussian noise
+        action_t = torch.randn((batch_size, action_dim), device=state.device)
+        
+        # 2. Loop backwards from T-1 down to 0
+        for t_step in reversed(range(self.num_timesteps)):
+            t = torch.full((batch_size, 1), t_step, device=state.device, dtype=torch.float32)
+            
+            # Predict the noise using our trained denoiser
+            predicted_noise = self.denoiser(state, action_t, t)
+            
+            # Math to subtract a fraction of the noise based on the timestep schedule
+            alpha_t = (1.0 - self.betas[t_step])
+            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_step]
+            
+            # Remove the predicted noise
+            action_t = (action_t - (1.0 - alpha_t) / sqrt_one_minus_alpha_cumprod_t * predicted_noise) / torch.sqrt(alpha_t)
+            
+            # If we aren't at the very last step, add a tiny bit of random noise back in 
+            # (this prevents the model from collapsing to a single point, a key diffusion trick)
+            if t_step > 0:
+                noise = torch.randn_like(action_t)
+                sigma_t = torch.sqrt(self.betas[t_step])
+                action_t = action_t + sigma_t * noise
+                
+        # 3. Apply Softmax to ensure the final weights are positive and sum exactly to 1.0 (100%)
+        final_weights = F.softmax(action_t, dim=-1)
+        return final_weights

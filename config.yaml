@@ -5,7 +5,13 @@ data:
   # The broad market benchmark used to train the HMM crash regimes
   market_ticker: SPY
   # The individual assets that make up the portfolio allocation universe
-  stock_tickers: [AAPL, MSFT, NVDA, JPM, JNJ, PG, AMZN, XOM, UNH, HD]
+  stock_tickers: [
+    AAPL, MSFT, NVDA, JPM, JNJ, PG, AMZN, XOM, UNH, HD, 
+    GOOGL, META, TSLA, V, LLY, BAC, WMT, MA, CVX, ABBV, 
+    KO, MRK, PEP, COST, TMO, CSCO, MCD, CRM, INTC, PFE, 
+    WFC, DIS, NFLX, AMD, CMCSA, ABT, ADBE, IBM, PM, NKE, 
+    MMM, ORCL, HON, GE, QCOM, TXN, MO, GS, SPG, CAT
+  ]
   # 10-year in-sample training window (reserves 2024+ for out-of-sample testing)
   start_date: "2014-01-01"
   end_date: "2024-01-01"
@@ -39,3 +45,17 @@ expert:
   max_weight: 0.20
   # Baseline annual return rate for cash (e.g., 0.04 = 4% Treasury yield)
   annual_risk_free_rate: 0.0
+
+# ---------------------------------------------------------
+# 4. Imitation Learning Configuration (PortDiff)
+# ---------------------------------------------------------
+il:
+  # Model Architecture
+  hidden_dim: 256
+  t_dim: 16
+  # Diffusion Physics
+  num_timesteps: 100
+  # Training Hyperparameters
+  batch_size: 64
+  learning_rate: 0.001
+  epochs: 50
