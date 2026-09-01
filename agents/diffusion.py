@@ -4,13 +4,14 @@ import torch.nn.functional as F
 import math
 
 class MLPDenoiser(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=256, t_dim=16):
+    def __init__(self, state_dim, action_dim, hidden_dim=256, t_dim=16, use_layernorm=False):
         """
         Args:
             state_dim (int): The size of the flattened market returns.
             action_dim (int): The total number of assets in the portfolio (risky assets + cash).
             hidden_dim (int): Size of the hidden layers in the MLP.
             t_dim (int): Size of the sinusoidal time embedding.
+            use_layernorm (bool): Stabilizes gradients for large-dimensional inputs.
         """
         super().__init__()
         self.t_dim = t_dim
@@ -18,15 +19,24 @@ class MLPDenoiser(nn.Module):
         # The input to our MLP is the combination of the state, the noisy action, and the time embedding
         in_dim = state_dim + action_dim + t_dim
         
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.Mish(), # Mish is a modern activation function that works great for MLPs
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Mish(),
-            nn.Linear(hidden_dim, action_dim) # The output is the predicted noise (same shape as action_dim)
-        )
+        layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Mish())
+        
+        layers.extend([nn.Linear(hidden_dim, hidden_dim)])
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Mish())
+        
+        layers.extend([nn.Linear(hidden_dim, hidden_dim)])
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Mish())
+        
+        layers.append(nn.Linear(hidden_dim, action_dim))
+        
+        self.net = nn.Sequential(*layers)
         
     def time_embedding(self, t):
         """
@@ -60,22 +70,34 @@ class PortDiff(nn.Module):
     sqrt_alphas_cumprod: torch.Tensor
     sqrt_one_minus_alphas_cumprod: torch.Tensor
     
-    def __init__(self, denoiser, num_timesteps=100):
+    def __init__(self, denoiser, num_timesteps=100, beta_schedule="linear"):
         """
         The core Diffusion Model that wraps the MLPDenoiser.
         
         Args:
             denoiser (nn.Module): The neural network that predicts the noise.
             num_timesteps (int): The total number of steps to add/remove noise (T).
+            beta_schedule (str): The noise scheduling strategy ("linear" or "cosine").
         """
         super().__init__()
         self.denoiser = denoiser
         self.num_timesteps = num_timesteps
         
-        # 1. Beta Schedule: Controls how much noise to add at each step.
-        # We use a simple linear schedule from 0.0001 (tiny noise) to 0.02 (high noise).
-        betas = torch.linspace(0.0001, 0.02, num_timesteps)
-        
+        # 1. Beta Schedule: Controls how much noise to add at each step
+        if beta_schedule == "linear":
+            betas = torch.linspace(0.0001, 0.02, num_timesteps)
+        elif beta_schedule == "cosine":
+            # The Cosine Schedule adds noise gently at first to protect the structure
+            steps = num_timesteps + 1
+            x = torch.linspace(0, num_timesteps, steps)
+            s = 0.008
+            alphas_cumprod = torch.cos(((x / num_timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+            betas = torch.clip(betas, 0.0001, 0.9999)
+        else:
+            raise ValueError(f"Unknown beta schedule: {beta_schedule}")
+            
         # 2. Alphas: Math shortcuts needed for the diffusion formulas
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)

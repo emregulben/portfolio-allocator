@@ -53,8 +53,10 @@ il:
   # Model Architecture
   hidden_dim: 256
   t_dim: 16
+  use_layernorm: true
   # Diffusion Physics
   num_timesteps: 100
+  beta_schedule: "cosine"
   # Training Hyperparameters
   batch_size: 64
   learning_rate: 0.001
