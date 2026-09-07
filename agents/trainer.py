@@ -42,8 +42,13 @@ class PortDiffTrainer:
             # 2. Forward pass (PortDiff automatically adds noise and calculates MSE loss)
             loss = self.model(state, action_clean)
             
-            # 3. Backpropagation (calculate errors) and Optimizer Step (tweak weights)
+            # 3. Backpropagation (calculate errors)
             loss.backward()
+            
+            # 4. Gradient Clipping: Enforce a mathematical speed limit to prevent explosion!
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            # 5. Optimizer Step (tweak weights)
             self.optimizer.step()
             
             total_loss += loss.item()

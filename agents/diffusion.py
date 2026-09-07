@@ -63,6 +63,77 @@ class MLPDenoiser(nn.Module):
         # Pass it through the MLP to predict the noise!
         return self.net(x)
 
+class TransformerDenoiser(nn.Module):
+    def __init__(self, n_assets, action_dim, window_size=60, hidden_dim=256, t_dim=16, n_heads=4, n_layers=2):
+        """
+        An Attention-based Denoiser that processes the raw 2D market state.
+        
+        Args:
+            n_assets (int): Number of stock features per day.
+            action_dim (int): Total number of assets in the portfolio (stocks + cash).
+            window_size (int): Number of days in the sequence.
+            hidden_dim (int): Size of the Transformer embedding dimension (d_model).
+            t_dim (int): Size of the sinusoidal time embedding.
+            n_heads (int): Number of attention heads.
+            n_layers (int): Number of Transformer encoder layers.
+        """
+        super().__init__()
+        self.t_dim = t_dim
+        
+        # 1. Project the raw stock returns (n_assets) up to the hidden_dim
+        self.state_proj = nn.Linear(n_assets, hidden_dim)
+        
+        # 2. Positional Encodings so the Transformer understands chronological time
+        self.pos_embedding = nn.Parameter(torch.randn(1, window_size, hidden_dim) * 0.02)
+        
+        # 3. The Transformer Backbone (processes the 2D matrix)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, 
+            nhead=n_heads, 
+            dim_feedforward=hidden_dim * 4,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        
+        # 4. Final MLP to process the combined [State + Noisy Action + Time]
+        in_dim = hidden_dim + action_dim + t_dim
+        self.final_mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+        self.net = self.final_mlp
+        
+    def time_embedding(self, t):
+        """Converts integer timestep into a continuous sinusoidal embedding."""
+        half_dim = self.t_dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=t.device) * -embeddings)
+        embeddings = t * embeddings
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
+
+    def forward(self, state, action_noisy, t):
+        # 1. Process the 2D State Matrix (batch, window_size, n_assets)
+        # Project up to hidden_dim and add positional encodings
+        x = self.state_proj(state) + self.pos_embedding
+        
+        # Pass through the Self-Attention layers
+        x = self.transformer(x)
+        
+        # Pool the sequence by taking the mean across the window_size dimension
+        # This gives us a single 1D vector summarizing the entire 60-day market state
+        state_repr = x.mean(dim=1) 
+        
+        # 2. Prepare Time Embeddings
+        t_embed = self.time_embedding(t)
+        
+        # 3. Combine everything and predict the noise!
+        combined = torch.cat([state_repr, action_noisy, t_embed], dim=-1)
+        return self.final_mlp(combined)
+
 class PortDiff(nn.Module):
     # Type hints to keep the IDE's static checker happy
     betas: torch.Tensor
