@@ -172,28 +172,35 @@ def test_hmm_decode_unfitted_raises_error():
 def test_hmm_decode_exact_values():
     """
     Validates that decoded returns match the state-conditional mean,
-    standard deviation, and Student-t random noise.
+    standard deviation, and appropriate random noise for both distributions.
     """
     # 1. Fit the exact 2-state model
     returns = pd.Series([-0.02, 0.01, 0.0, 0.03, -0.01])
-    model = HybridJumpsHMM(n_states=2)
-    model.fit(returns)
-    
-    # 2. Define target states to decode (State 0 and State 1)
     states = np.array([0, 1])
     
-    # 3. Generate expected noise Z using the same seed
+    # --- Test Gaussian (Default) ---
+    model_gauss = HybridJumpsHMM(n_states=2, emission_dist="gaussian")
+    model_gauss.fit(returns)
+    
     np.random.seed(42)
-    expected_z = np.random.standard_t(df=5, size=2)
+    expected_z_gauss = np.random.standard_normal(size=2)
+    expected_gauss = model_gauss.state_means[states] + model_gauss.state_stds[states] * expected_z_gauss
     
-    # 4. Decode using the same seed
     np.random.seed(42)
-    decoded_returns = model.decode_states(states)
+    decoded_gauss = model_gauss.decode_states(states)
+    assert np.allclose(decoded_gauss, expected_gauss)
     
-    # 5. Calculate expected returns: Mean + Std * Z
-    expected_returns = model.state_means[states] + model.state_stds[states] * expected_z
+    # --- Test Student-t ---
+    model_t = HybridJumpsHMM(n_states=2, emission_dist="student_t")
+    model_t.fit(returns)
     
-    assert np.allclose(decoded_returns, expected_returns)
+    np.random.seed(42)
+    expected_z_t = np.random.standard_t(df=5, size=2)
+    expected_t = model_t.state_means[states] + model_t.state_stds[states] * expected_z_t
+    
+    np.random.seed(42)
+    decoded_t = model_t.decode_states(states)
+    assert np.allclose(decoded_t, expected_t)
     
 def test_hmm_grid_search_unfitted_raises_error():
     """

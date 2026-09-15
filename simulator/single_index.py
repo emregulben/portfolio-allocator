@@ -10,11 +10,12 @@ class SingleIndexModel:
         Return_{i,t} = alpha_i + beta_i * Return_{Market,t} + residual_{i,t}
     """
 
-    def __init__(self, tickers: list[str]) -> None:
+    def __init__(self, tickers: list[str], emission_dist: str = "gaussian") -> None:
         if not tickers:
             raise ValueError("Tickers list cannot be empty.")
 
         self.tickers: list[str] = tickers
+        self.emission_dist: str = emission_dist
         self.alphas: np.ndarray = np.empty(0, dtype=np.float64)
         self.betas: np.ndarray = np.empty(0, dtype=np.float64)
         self.residuals: np.ndarray = np.empty((0, 0), dtype=np.float64)
@@ -80,9 +81,17 @@ class SingleIndexModel:
         n_steps = len(market_sim_returns)
         n_hist, n_assets = self.residuals.shape
 
-        # Resample empirical residual rows with replacement
-        resample_idx = np.random.choice(n_hist, size=n_steps, replace=True)
-        sampled_residuals = self.residuals[resample_idx, :]  # shape: (n_steps, N)
+        if self.emission_dist == "empirical":
+            # Resample raw historical residuals with replacement (Fat tails!)
+            resample_idx = np.random.choice(n_hist, size=n_steps, replace=True)
+            sampled_residuals = self.residuals[resample_idx, :] # shape: (n_steps, N)
+        elif self.emission_dist == "gaussian":
+            # Generate pure Gaussian noise based on the historical standard deviation (Clean Bell Curve!)
+            residual_stds = np.std(self.residuals, axis=0) 
+            z = np.random.standard_normal(size=(n_steps, n_assets))
+            sampled_residuals = z * residual_stds
+        else:
+            raise ValueError(f"Unknown emission_dist: {self.emission_dist}")
 
         # Calculate stock returns: Return_{i,t} = alpha_i + beta_i * Market_t + residual_{i,t}
         sim_returns_matrix = self.alphas + np.outer(market_sim_returns, self.betas) + sampled_residuals

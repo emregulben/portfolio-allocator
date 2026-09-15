@@ -58,9 +58,8 @@ def test_single_index_fit_exact_analytical_values():
 
 
 def test_single_index_simulate_output_shape_and_reproducibility():
-    """Validates simulation output shape, DataFrame columns, and random seed reproducibility."""
+    """Validates simulation output shape, DataFrame columns, and reproducibility for both distributions."""
     tickers = ["AAPL", "MSFT", "NVDA"]
-    model = SingleIndexModel(tickers=tickers)
     
     np.random.seed(42)
     t_days = 100
@@ -73,18 +72,25 @@ def test_single_index_simulate_output_shape_and_reproducibility():
     }
     stock_returns = pd.DataFrame(stock_data)
     
-    model.fit(stock_returns, market_hist)
-    
     sim_steps = 250
     sim_market = np.random.normal(0.0005, 0.01, sim_steps)
     
-    # Run simulation with seed 100
-    df_sim1 = model.simulate(sim_market, random_seed=100)
-    df_sim2 = model.simulate(sim_market, random_seed=100)
+    # 1. Test Gaussian (Default)
+    model_gauss = SingleIndexModel(tickers=tickers, emission_dist="gaussian")
+    model_gauss.fit(stock_returns, market_hist)
+    df_sim_gauss_1 = model_gauss.simulate(sim_market, random_seed=100)
+    df_sim_gauss_2 = model_gauss.simulate(sim_market, random_seed=100)
     
-    # Assert shape and columns
-    assert df_sim1.shape == (250, 3)
-    assert list(df_sim1.columns) == tickers
+    assert df_sim_gauss_1.shape == (250, 3)
+    assert list(df_sim_gauss_1.columns) == tickers
+    pd.testing.assert_frame_equal(df_sim_gauss_1, df_sim_gauss_2)
     
-    # Assert reproducibility
-    pd.testing.assert_frame_equal(df_sim1, df_sim2)
+    # 2. Test Empirical (Fat Tails)
+    model_emp = SingleIndexModel(tickers=tickers, emission_dist="empirical")
+    model_emp.fit(stock_returns, market_hist)
+    df_sim_emp_1 = model_emp.simulate(sim_market, random_seed=100)
+    df_sim_emp_2 = model_emp.simulate(sim_market, random_seed=100)
+    
+    assert df_sim_emp_1.shape == (250, 3)
+    assert list(df_sim_emp_1.columns) == tickers
+    pd.testing.assert_frame_equal(df_sim_emp_1, df_sim_emp_2)

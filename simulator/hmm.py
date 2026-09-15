@@ -8,8 +8,9 @@ class HybridJumpsHMM:
     """
     Hybrid Hidden Markov Model with Jump-Diffusion (HMM-WJ) for returns simulation.
     """
-    def __init__(self, n_states: int = 100):
+    def __init__(self, n_states: int = 100, emission_dist: str = "gaussian"):
         self.n_states = n_states
+        self.emission_dist = emission_dist
         
         self.boundaries = np.empty(0)
         self.T = np.empty((0, 0))
@@ -129,16 +130,21 @@ class HybridJumpsHMM:
                 counter += 1
                 
         return states
-    
+
     def decode_states(self, states: np.ndarray) -> np.ndarray:
         """
-        Decodes a sequence of states into continuous daily returns using Student-t emissions.
+        Decodes a sequence of states into continuous daily returns based on the chosen distribution.
         """
         if len(self.state_means) == 0 or len(self.state_stds) == 0:
             raise ValueError("Model must be fitted before decoding states.")
             
-        # Draw standard Student-t random variables (df = 5) for each day
-        z = np.random.standard_t(df=5, size=len(states))
+        # Dynamically switch between Gaussian and Student-t
+        if self.emission_dist == "gaussian":
+            z = np.random.standard_normal(size=len(states))
+        elif self.emission_dist == "student_t":
+            z = np.random.standard_t(df=5, size=len(states))
+        else:
+            raise ValueError(f"Unknown emission_dist: {self.emission_dist}")
         
         # Vectorized scaling and shifting using state-conditional parameters
         simulated_returns = self.state_means[states] + self.state_stds[states] * z
