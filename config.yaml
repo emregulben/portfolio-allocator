@@ -6,11 +6,7 @@ data:
   market_ticker: SPY
   # The individual assets that make up the portfolio allocation universe
   stock_tickers: [
-    AAPL, MSFT, NVDA, JPM, JNJ, PG, AMZN, XOM, UNH, HD, 
-    GOOGL, META, TSLA, V, LLY, BAC, WMT, MA, CVX, ABBV, 
-    KO, MRK, PEP, COST, TMO, CSCO, MCD, CRM, INTC, PFE, 
-    WFC, DIS, NFLX, AMD, CMCSA, ABT, ADBE, IBM, PM, NKE, 
-    MMM, ORCL, HON, GE, QCOM, TXN, MO, GS, SPG, CAT
+    AAPL, MSFT, NVDA, JPM, JNJ, PG, AMZN, XOM, UNH, HD
   ]
   # 10-year in-sample training window (reserves 2024+ for out-of-sample testing)
   start_date: "2014-01-01"
