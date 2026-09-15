@@ -3,6 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+def project_portfolio_weights(action_t, max_weight=0.20):
+    """Enforces Markowitz constraints by safely parking illegal excess into Cash."""
+    w = torch.clamp(action_t, min=0.0)
+    w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
+    w_risky = w[:, :-1]
+    w_cash = w[:, -1:]
+    excess = torch.clamp(w_risky - max_weight, min=0.0)
+    w_risky_clipped = w_risky - excess
+    w_cash_new = w_cash + excess.sum(dim=-1, keepdim=True)
+    return torch.cat([w_risky_clipped, w_cash_new], dim=-1)
+
 class MLPDenoiser(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=256, t_dim=16, use_layernorm=False):
         """
@@ -236,6 +247,6 @@ class PortDiff(nn.Module):
                 sigma_t = torch.sqrt(self.betas[t_step])
                 action_t = action_t + sigma_t * noise
                 
-        # 3. Apply Softmax to ensure the final weights are positive and sum exactly to 1.0 (100%)
-        final_weights = F.softmax(action_t, dim=-1)
+        # 3. Custom Projection: Enforce Markowitz constraints
+        final_weights = project_portfolio_weights(action_t, max_weight=0.20)
         return final_weights
