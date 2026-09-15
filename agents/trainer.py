@@ -1,3 +1,4 @@
+import copy
 import torch
 from torch.utils.data import DataLoader
 import torch.optim as optim
@@ -25,6 +26,9 @@ class PortDiffTrainer:
         # DataLoaders automatically shuffle and chunk our dataset into batches
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         self.val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        # Track the best model state to prevent overfitting
+        self.best_model_state = None
         
     def train_epoch(self):
         """Runs one full pass over the training data."""
@@ -57,37 +61,49 @@ class PortDiffTrainer:
         
     @torch.no_grad() # Disable gradient tracking to save memory
     def validate_epoch(self):
-        """Runs one full pass over the validation data to check for overfitting."""
+        """Runs one full pass over the validation data. Calculates Diffusion MSE and Action-Space MAE."""
         self.model.eval()
-        total_loss = 0.0
+        total_mse_loss = 0.0
+        total_mae_loss = 0.0
         
         for state, action_clean in self.val_loader:
             state = state.to(self.device)
             action_clean = action_clean.to(self.device)
             
+            # 1. Standard Diffusion Noise Loss
             loss = self.model(state, action_clean)
-            total_loss += loss.item()
+            total_mse_loss += loss.item()
             
-        return total_loss / len(self.val_loader)
-        
+            # 2. Direct Action-Space MAE (Imitation Quality)
+            # Sample actual weights from pure noise to see how well we clone the expert
+            sampled_actions = self.model.sample(state)
+            mae = torch.nn.functional.l1_loss(sampled_actions, action_clean)
+            total_mae_loss += mae.item()
+            
+        return total_mse_loss / len(self.val_loader), total_mae_loss / len(self.val_loader)
+    
     def train(self, epochs=50):
         """
         Runs the training loop for the specified number of epochs.
         """
         print(f"Starting training on device: {self.device}")
-        best_val_loss = float('inf')
+        best_val_mae = float('inf')
         
         for epoch in range(1, epochs + 1):
             train_loss = self.train_epoch()
-            val_loss = self.validate_epoch()
+            val_mse, val_mae = self.validate_epoch()
             
             # Print progress every 10 epochs
             if epoch % 10 == 0 or epoch == 1:
-                print(f"Epoch {epoch:03d} | Train Loss (MSE): {train_loss:.6f} | Val Loss (MSE): {val_loss:.6f}")
+                print(f"Epoch {epoch:03d} | Train MSE: {train_loss:.5f} | Val MSE: {val_mse:.5f} | Val MAE: {val_mae:.5f}")
                 
-            # Track the best model to prevent overfitting
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Track the best model based on ACTUAL weight imitation (MAE)
+            if val_mae < best_val_mae:
+                best_val_mae = val_mae
+                self.best_model_state = copy.deepcopy(self.model.state_dict())
                 
-        print("Training complete!")
+        print(f"Training complete! Restoring best checkpoint (Val MAE: {best_val_mae:.5f}).")
+        if self.best_model_state is not None:
+            self.model.load_state_dict(self.best_model_state)
+            
         return self.model
