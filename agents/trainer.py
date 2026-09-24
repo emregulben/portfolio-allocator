@@ -63,6 +63,11 @@ class PortDiffTrainer:
     def validate_epoch(self):
         """Runs one full pass over the validation data. Calculates Diffusion MSE and Action-Space MAE."""
         self.model.eval()
+        
+        # Lock RNG seed to ensure identical noise generation across epochs, 
+        # making the MAE metric strictly deterministic for early stopping.
+        torch.manual_seed(42)
+        
         total_mse_loss = 0.0
         total_mae_loss = 0.0
         

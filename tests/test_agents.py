@@ -6,7 +6,8 @@ import numpy as np
 
 from agents.dataset import PortfolioDataset
 from agents.trainer import PortDiffTrainer
-from agents.diffusion import project_portfolio_weights
+from agents.diffusion import project_portfolio_weights, MLPDenoiser, PortDiff
+from torch.utils.data import TensorDataset
 
 def test_portfolio_dataset_temporal_alignment():
     """Proves mathematically that there is zero future data leakage in the dataset."""
@@ -107,3 +108,32 @@ def test_custom_projection_algorithm():
     assert torch.all(projected >= 0), "No weights can be negative"
     assert torch.allclose(projected.sum(dim=-1), torch.ones(3)), "All portfolios must sum to 1.0"
     assert torch.all(projected[:, :-1] <= 0.2001), "No risky asset can exceed 20%"
+    
+def test_validation_determinism():
+    """
+    Ensures that PortDiffTrainer.validate_epoch() locks the random seed internally.
+    If the seed is not locked, diffusion noise will cause the MAE to fluctuate across calls,
+    corrupting the Early Stopping mechanism.
+    """
+    
+    # 1. Setup a tiny dummy model
+    state_dim, action_dim = 120, 11
+    denoiser = MLPDenoiser(state_dim=state_dim, action_dim=action_dim, hidden_dim=32, t_dim=16)
+    model = PortDiff(denoiser=denoiser, num_timesteps=3, beta_schedule="linear")
+    
+    # 2. Setup a dummy dataset (batch_size=4)
+    dummy_states = torch.randn(4, state_dim)
+    dummy_actions = torch.rand(4, action_dim)
+    dummy_actions = dummy_actions / dummy_actions.sum(dim=1, keepdim=True) # Normalize
+    
+    dataset = TensorDataset(dummy_states, dummy_actions)
+    
+    # 3. Instantiate trainer (using dummy dataset for both train and val)
+    trainer = PortDiffTrainer(model=model, train_dataset=dataset, val_dataset=dataset, batch_size=4)
+    
+    # 4. Call validate_epoch twice in a row
+    mse1, mae1 = trainer.validate_epoch()
+    mse2, mae2 = trainer.validate_epoch()
+    
+    # 5. Assertion: If the seed lock is missing, these floats will differ drastically
+    assert abs(mae1 - mae2) < 1e-7, "validate_epoch() is not deterministic! The random seed lock is missing."
