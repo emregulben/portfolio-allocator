@@ -6,7 +6,7 @@ import numpy as np
 
 from agents.dataset import PortfolioDataset
 from agents.trainer import PortDiffTrainer
-from agents.diffusion import project_portfolio_weights, MLPDenoiser, PortDiff
+from agents.diffusion import map_to_feasible_portfolio, MLPDenoiser, PortDiff
 from torch.utils.data import TensorDataset
 
 def test_portfolio_dataset_temporal_alignment():
@@ -89,7 +89,7 @@ def test_custom_projection_algorithm():
         [0.10, 0.10, 0.10, 0.70],  # Case 3: Completely valid, safe portfolio.
     ])
     
-    projected = project_portfolio_weights(raw_outputs, max_weight=0.20)
+    projected = map_to_feasible_portfolio(raw_outputs, max_weight=0.20)
     
     # Check Case 1: [0.8, 0.1, 0.1, 0.0] -> Stock A loses 0.6. Cash absorbs 0.6.
     assert torch.allclose(projected[0], torch.tensor([0.20, 0.10, 0.10, 0.60]))

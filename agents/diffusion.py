@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-def project_portfolio_weights(action_t, max_weight=0.20):
+def map_to_feasible_portfolio(action_t, max_weight=0.20):
     """Enforces Markowitz constraints by safely parking illegal excess into Cash."""
     w = torch.clamp(action_t, min=0.0)
     w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
@@ -248,5 +248,5 @@ class PortDiff(nn.Module):
                 action_t = action_t + sigma_t * noise
                 
         # 3. Custom Projection: Enforce Markowitz constraints
-        final_weights = project_portfolio_weights(action_t, max_weight=0.20)
+        final_weights = map_to_feasible_portfolio(action_t, max_weight=0.20)
         return final_weights
