@@ -6,7 +6,7 @@ import numpy as np
 
 from agents.dataset import PortfolioDataset
 from agents.trainer import PortDiffTrainer
-from agents.diffusion import map_to_feasible_portfolio, MLPDenoiser, PortDiff
+from agents.diffusion import map_to_feasible_portfolio, MLPDenoiser, MeanCovMLPDenoiser, PortDiff
 from torch.utils.data import TensorDataset
 
 def test_portfolio_dataset_temporal_alignment():
@@ -137,3 +137,38 @@ def test_validation_determinism():
     
     # 5. Assertion: If the seed lock is missing, these floats will differ drastically
     assert abs(mae1 - mae2) < 1e-7, "validate_epoch() is not deterministic! The random seed lock is missing."
+    
+def test_mean_cov_calculation():
+    """
+    Verifies that MeanCovMLPDenoiser correctly calculates the batch-wise 
+    unbiased sample covariance and mean, matching standard numpy implementations.
+    """
+    
+    batch_size, window_size, n_assets = 2, 60, 10
+    
+    # Generate random test data using float64 to avoid floating point precision errors during testing
+    state = torch.randn(batch_size, window_size, n_assets, dtype=torch.float64)
+    
+    # Initialize the denoiser and force it to float64 for the test
+    denoiser = MeanCovMLPDenoiser(n_assets=n_assets, action_dim=11).double()
+    
+    # 1. Get the custom PyTorch batch output
+    features = denoiser._compute_mean_and_cov(state)
+    
+    # Extract the PyTorch means (first 10 elements) and covariances (remaining 100 elements)
+    pt_means = features[:, :n_assets].numpy()
+    pt_covs = features[:, n_assets:].view(batch_size, n_assets, n_assets).numpy()
+    
+    state_np = state.numpy()
+    
+    # 2. Iterate through the batch and calculate the Gold-Standard Numpy outputs
+    for i in range(batch_size):
+        # Numpy mean along the time dimension (axis=0)
+        np_mean = np.mean(state_np[i], axis=0)
+        
+        # Numpy covariance: rowvar=False ensures columns are assets and rows are time observations
+        np_cov = np.cov(state_np[i], rowvar=False)
+        
+        # 3. Assert perfect mathematical equivalence
+        assert np.allclose(pt_means[i], np_mean), f"Mean mismatch at batch index {i}"
+        assert np.allclose(pt_covs[i], np_cov), f"Covariance mismatch at batch index {i}"

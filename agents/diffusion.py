@@ -74,6 +74,78 @@ class MLPDenoiser(nn.Module):
         # Pass it through the MLP to predict the noise!
         return self.net(x)
 
+class MeanCovMLPDenoiser(nn.Module):
+    def __init__(self, n_assets, action_dim, hidden_dim=256, t_dim=16, use_layernorm=False):
+        """
+        A control benchmark architecture that bypasses representation learning.
+        It calculates the Mean and Covariance explicitly from the raw state tensor
+        and feeds those flattened features directly to the MLP.
+        """
+        super().__init__()
+        self.t_dim = t_dim
+        
+        # n_assets (Means) + n_assets*n_assets (Covariances)
+        extracted_features_dim = n_assets + (n_assets * n_assets)
+        in_dim = extracted_features_dim + action_dim + t_dim
+        
+        layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Mish())
+        
+        layers.extend([nn.Linear(hidden_dim, hidden_dim)])
+        if use_layernorm:
+            layers.append(nn.LayerNorm(hidden_dim))
+        layers.append(nn.Mish())
+        
+        layers.append(nn.Linear(hidden_dim, action_dim))
+        
+        self.net = nn.Sequential(*layers)
+
+    def _compute_mean_and_cov(self, state):
+        """
+        Mathematically extracts the rolling mean and covariance from the batch state.
+        
+        Args:
+            state (torch.Tensor): Raw market returns of shape (batch_size, window_size, n_assets).
+            
+        Returns:
+            torch.Tensor: Flattened concatenated Mean and Covariance of shape (batch_size, n_assets + n_assets^2).
+        """
+        batch_size, window_size, n_assets = state.shape
+        
+        # Calculate Mean (shape: batch_size, n_assets)
+        mu = state.mean(dim=1)
+        
+        # Calculate Covariance Matrix (shape: batch_size, n_assets, n_assets)
+        # Center the data by subtracting the mean
+        state_centered = state - mu.unsqueeze(1)
+        
+        # Batch Matrix Multiplication (bmm): (batch, assets, window) x (batch, window, assets)
+        # We divide by (window_size - 1) for standard unbiased sample covariance
+        cov = torch.bmm(state_centered.transpose(1, 2), state_centered) / (window_size - 1)
+        
+        # Flatten both and concatenate (Output shape: batch_size, 110)
+        return torch.cat([mu.view(batch_size, -1), cov.view(batch_size, -1)], dim=-1)
+
+    def time_embedding(self, t):
+        half_dim = self.t_dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=t.device) * -embeddings)
+        embeddings = t * embeddings
+        return torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+
+    def forward(self, state, action_noisy, t):
+        # 1. Intercept the raw state and extract Mean/Covariance features
+        features = self._compute_mean_and_cov(state)
+        
+        # 2. Embed Time
+        t_embed = self.time_embedding(t)
+        
+        # 3. Combine and pass to the Neural Network
+        x = torch.cat([features, action_noisy, t_embed], dim=-1)
+        return self.net(x)
+
 class TransformerDenoiser(nn.Module):
     def __init__(self, n_assets, action_dim, window_size=60, hidden_dim=256, t_dim=16, n_heads=4, n_layers=2):
         """
@@ -247,6 +319,6 @@ class PortDiff(nn.Module):
                 sigma_t = torch.sqrt(self.betas[t_step])
                 action_t = action_t + sigma_t * noise
                 
-        # 3. Custom Projection: Enforce Markowitz constraints
+        # 3. Custom Feasibility Mapping: Enforce Markowitz constraints
         final_weights = map_to_feasible_portfolio(action_t, max_weight=0.20)
         return final_weights
