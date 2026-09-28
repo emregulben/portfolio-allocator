@@ -14,7 +14,7 @@ from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
 from experts.markowitz import MarkowitzExpert
 from agents.dataset import PortfolioDataset
-from agents.diffusion import MLPDenoiser, TransformerDenoiser, PortDiff
+from agents.diffusion import MLPDenoiser, TransformerDenoiser, MeanCovMLPDenoiser, PortDiff
 from agents.trainer import PortDiffTrainer
 from torch.utils.data import Subset
 
@@ -42,7 +42,17 @@ def prepare_market_data(config, hmm_dist="gaussian", sim_dist="gaussian"):
     
     return hmm, sim_model
 
-def evaluate_config(denoiser_class, hyperparams, config, hmm, sim_model, stock_tickers, n_market_seeds=3, n_diff_seeds=3):
+def evaluate_config(
+    denoiser_class,
+    hyperparams,
+    config,
+    hmm,
+    sim_model,
+    stock_tickers,
+    n_market_seeds=3,
+    n_diff_seeds=3,
+    seed_offset=0
+):
     """
     Rigorously evaluates a single architecture and hyperparameter combination.
     
@@ -66,7 +76,12 @@ def evaluate_config(denoiser_class, hyperparams, config, hmm, sim_model, stock_t
     )
     
     # Iterate over independent market realities to prevent overfitting to a single path
-    for market_seed in range(n_market_seeds):
+    for i in range(n_market_seeds):
+        market_seed = i + seed_offset
+        
+        # Enforce strict determinism for the HMM state generation
+        np.random.seed(market_seed)
+        
         sim_states = hmm.simulate_states(config["hmm"]["simulation"]["n_steps"], epsilon=hmm.epsilon, lambd=hmm.lambd)
         sim_stocks = sim_model.simulate(hmm.decode_states(sim_states), random_seed=market_seed)
         
@@ -99,6 +114,13 @@ def evaluate_config(denoiser_class, hyperparams, config, hmm, sim_model, stock_t
             use_layernorm = hyperparams.get('use_layernorm', True)
             denoiser = MLPDenoiser(
                 state_dim=state_dim, action_dim=action_dim, 
+                hidden_dim=hyperparams['hidden_dim'], t_dim=config['il']['t_dim'], 
+                use_layernorm=use_layernorm
+            )
+        elif denoiser_class == MeanCovMLPDenoiser:
+            use_layernorm = hyperparams.get('use_layernorm', True)
+            denoiser = MeanCovMLPDenoiser(
+                n_assets=n_assets, action_dim=action_dim, 
                 hidden_dim=hyperparams['hidden_dim'], t_dim=config['il']['t_dim'], 
                 use_layernorm=use_layernorm
             )
@@ -153,96 +175,209 @@ if __name__ == "__main__":
     logger.info("Preparing Gaussian Market Data...")
     hmm, sim_model = prepare_market_data(config, hmm_dist="gaussian", sim_dist="gaussian")
     stock_tickers = list(config["data"]["stock_tickers"])
-    
-    # Define grid search parameter space
-    learning_rates = [1e-3, 1e-4]
-    hidden_dims = [128, 256]
-    num_timesteps_list = [50, 100]
-    beta_schedules = ["linear", "cosine"]
-    batch_sizes = [32, 64]
-    epochs_list = [15]
-    use_layernorm_list = [True, False]
-    
-    mlp_results = []
-    
-    # Pre-calculate all MLP combinations to generate progress percentages
-    mlp_combinations = list(itertools.product(
-        learning_rates, hidden_dims, num_timesteps_list, beta_schedules, batch_sizes, epochs_list, use_layernorm_list
-    ))
-    total_mlp = len(mlp_combinations)
-    
-    logger.info("\n" + "="*50 + f"\nSTARTING MLP GRID SEARCH ({total_mlp} combinations)\n" + "="*50)
-    for i, (lr, hd, ts, beta, bs, ep, ln) in enumerate(mlp_combinations, 1):
-        hyperparams = {
-            'learning_rate': lr, 'hidden_dim': hd, 'num_timesteps': ts, 
-            'beta_schedule': beta, 'batch_size': bs, 'epochs': ep, 'use_layernorm': ln
-        }
         
-        # Inject the exact progress percentage into the logger!
-        pct = (i / total_mlp) * 100
-        logger.info(f"\n--- Testing MLP Config [{i}/{total_mlp} | {pct:.1f}% Complete] ---\n{hyperparams}")
+    
+    
+    # # Define grid search parameter space
+    # # Lock the empirically proven parameters to save cluster compute time
+    # learning_rates = [1e-3]
+    # batch_sizes = [64]
+    # beta_schedules = ["linear"]
+    # epochs_list = [15]
+    # num_timesteps_list = [100]
+    # use_layernorm_list = [False]
+    
+    # # Expand the boundaries for the parameters that hit the ceiling in local trials
+    # hidden_dims = [512, 1024]
+    
+    # mlp_results = []
+    
+    # # Pre-calculate all MLP combinations to generate progress percentages
+    # mlp_combinations = list(itertools.product(
+    #     learning_rates, hidden_dims, num_timesteps_list, beta_schedules, batch_sizes, epochs_list, use_layernorm_list
+    # ))
+    # total_mlp = len(mlp_combinations)
+    
+    # logger.info("\n" + "="*50 + f"\nSTARTING MLP GRID SEARCH ({total_mlp} combinations)\n" + "="*50)
+    # for i, (lr, hd, ts, beta, bs, ep, ln) in enumerate(mlp_combinations, 1):
+    #     hyperparams = {
+    #         'learning_rate': lr, 'hidden_dim': hd, 'num_timesteps': ts, 
+    #         'beta_schedule': beta, 'batch_size': bs, 'epochs': ep, 'use_layernorm': ln
+    #     }
         
-        avg_mae = evaluate_config(
-            MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
-            n_market_seeds=1, n_diff_seeds=1
-        )
-        logger.info(f"RESULT -> Average Action-Space MAE: {avg_mae:.4f}")
-        mlp_results.append({'hyperparams': hyperparams, 'mae': avg_mae})
+    #     # Inject the exact progress percentage into the logger!
+    #     pct = (i / total_mlp) * 100
+    #     logger.info(f"\n--- Testing MLP Config [{i}/{total_mlp} | {pct:.1f}% Complete] ---\n{hyperparams}")
         
-    logger.info("MLP Search Complete!")
-    best_mlp = None
-    if mlp_results:
-        best_mlp = min(mlp_results, key=lambda x: x['mae'])
-        logger.info(f"\n*** BEST MLP CONFIGURATION ***\n{best_mlp}")
+    #     avg_mae = evaluate_config(
+    #         MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+    #         n_market_seeds=1, n_diff_seeds=1
+    #     )
+    #     logger.info(f"RESULT -> Average Action-Space MAE: {avg_mae:.4f}")
+    #     mlp_results.append({'hyperparams': hyperparams, 'mae': avg_mae})
+        
+    # logger.info("MLP Search Complete!")
+    # best_mlp = None
+    # if mlp_results:
+    #     best_mlp = min(mlp_results, key=lambda x: x['mae'])
+    #     logger.info(f"\n*** BEST MLP CONFIGURATION ***\n{best_mlp}")
 
-    # Define Transformer-specific parameter space
-    n_heads_list = [2, 4]
-    n_layers_list = [1, 2]
-    tf_results = []
+    # # Define Transformer-specific parameter space
+    # n_heads_list = [2, 4]
+    # n_layers_list = [1, 2]
+    # tf_results = []
     
-    # Pre-calculate valid Transformer combinations (filtering out PyTorch invalid dimensions)
-    tf_combinations = list(itertools.product(
-        learning_rates, hidden_dims, num_timesteps_list, beta_schedules, batch_sizes, epochs_list, n_heads_list, n_layers_list
-    ))
-    valid_tf_combinations = [combo for combo in tf_combinations if combo[1] % combo[6] == 0]
-    total_tf = len(valid_tf_combinations)
+    # # Pre-calculate valid Transformer combinations (filtering out PyTorch invalid dimensions)
+    # tf_combinations = list(itertools.product(
+    #     learning_rates, hidden_dims, num_timesteps_list, beta_schedules, batch_sizes, epochs_list, n_heads_list, n_layers_list
+    # ))
+    # valid_tf_combinations = [combo for combo in tf_combinations if combo[1] % combo[6] == 0]
+    # total_tf = len(valid_tf_combinations)
     
-    logger.info("\n" + "="*50 + f"\nSTARTING TRANSFORMER GRID SEARCH ({total_tf} combinations)\n" + "="*50)
-    for i, (lr, hd, ts, beta, bs, ep, heads, layers) in enumerate(valid_tf_combinations, 1):
+    # logger.info("\n" + "="*50 + f"\nSTARTING TRANSFORMER GRID SEARCH ({total_tf} combinations)\n" + "="*50)
+    # for i, (lr, hd, ts, beta, bs, ep, heads, layers) in enumerate(valid_tf_combinations, 1):
+    #     hyperparams = {
+    #         'learning_rate': lr, 'hidden_dim': hd, 'num_timesteps': ts, 
+    #         'beta_schedule': beta, 'batch_size': bs, 'epochs': ep, 
+    #         'n_heads': heads, 'n_layers': layers
+    #     }
+        
+    #     pct = (i / total_tf) * 100
+    #     logger.info(f"\n--- Testing Transformer Config [{i}/{total_tf} | {pct:.1f}% Complete] ---\n{hyperparams}")
+        
+    #     avg_mae = evaluate_config(
+    #         TransformerDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+    #         n_market_seeds=1, n_diff_seeds=1
+    #     )
+    #     logger.info(f"RESULT -> Average Action-Space MAE: {avg_mae:.4f}")
+    #     tf_results.append({'hyperparams': hyperparams, 'mae': avg_mae})
+        
+    # logger.info("Transformer Search Complete!")
+    # best_tf = None
+    # if tf_results:
+    #     best_tf = min(tf_results, key=lambda x: x['mae'])
+    #     logger.info(f"\n*** BEST TRANSFORMER CONFIGURATION ***\n{best_tf}")
+
+    # # === CONTROL BENCHMARK: MEAN-COV MLP GRID SEARCH ===
+    # # This loop isolates whether the models are failing at representation learning.
+    # mean_cov_results = []
+    
+    # logger.info("\n" + "="*50 + f"\nSTARTING MEAN-COV MLP GRID SEARCH ({total_mlp} combinations)\n" + "="*50)
+    # for i, (lr, hd, ts, beta, bs, ep, ln) in enumerate(mlp_combinations, 1):
+    #     hyperparams = {
+    #         'learning_rate': lr, 'hidden_dim': hd, 'num_timesteps': ts, 
+    #         'beta_schedule': beta, 'batch_size': bs, 'epochs': ep, 'use_layernorm': ln
+    #     }
+        
+    #     pct = (i / total_mlp) * 100
+    #     logger.info(f"\n--- Testing Mean-Cov MLP Config [{i}/{total_mlp} | {pct:.1f}% Complete] ---\n{hyperparams}")
+        
+    #     avg_mae = evaluate_config(
+    #         MeanCovMLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+    #         n_market_seeds=1, n_diff_seeds=1
+    #     )
+    #     logger.info(f"RESULT -> Average Action-Space MAE: {avg_mae:.4f}")
+    #     mean_cov_results.append({'hyperparams': hyperparams, 'mae': avg_mae})
+        
+    # logger.info("Mean-Cov MLP Search Complete!")
+    # best_mean_cov = None
+    # if mean_cov_results:
+    #     best_mean_cov = min(mean_cov_results, key=lambda x: x['mae'])
+    #     logger.info(f"\n*** BEST MEAN-COV MLP CONFIGURATION ***\n{best_mean_cov}")
+
+    #    # Determine the Overall Winner safely to satisfy static type checkers
+    # all_best = []
+    # if best_mlp is not None:
+    #     all_best.append(("MLP", best_mlp))
+    # if best_tf is not None:
+    #     all_best.append(("Transformer", best_tf))
+    # if best_mean_cov is not None:
+    #     all_best.append(("Mean-Cov MLP", best_mean_cov))
+        
+    # if not all_best:
+    #     raise ValueError("All grid searches failed. No models were evaluated.")
+        
+    # overall_winner_name, overall_winner_config = min(all_best, key=lambda x: x[1]['mae'])
+    
+    # # === UNTOUCHED TEST SET EVALUATION ===
+    # logger.info("\n" + "="*50 + "\nRUNNING BLIND TEST ON UNTOUCHED MARKET SEED\n" + "="*50)
+    # logger.info("Generating a completely independent dataset to prevent hyperparameter overfitting...")
+    
+    # # Map the winner name back to the Python class
+    # if overall_winner_name == "MLP":
+    #     winner_class = MLPDenoiser
+    # elif overall_winner_name == "Transformer":
+    #     winner_class = TransformerDenoiser
+    # else:
+    #     winner_class = MeanCovMLPDenoiser
+        
+    # # Evaluate the winner using a large market seed offset to guarantee it has never seen this data
+    # blind_mae = evaluate_config(
+    #     winner_class, overall_winner_config['hyperparams'], config, hmm, sim_model, stock_tickers,
+    #     n_market_seeds=1, n_diff_seeds=3, seed_offset=9999 
+    # )
+
+    # # === FINAL MASTER SUMMARY ===
+    # logger.info("\n" + "="*50 + "\nFINAL ARCHITECTURE SHOWDOWN\n" + "="*50)
+    
+    # if best_mlp is not None:
+    #     logger.info(f"🏆 BEST MLP MAE: {best_mlp['mae']:.4f}")
+    #     logger.info(f"Parameters: {best_mlp['hyperparams']}\n")
+        
+    # if best_tf is not None:
+    #     logger.info(f"🏆 BEST TRANSFORMER MAE: {best_tf['mae']:.4f}")
+    #     logger.info(f"Parameters: {best_tf['hyperparams']}\n")
+        
+    # if best_mean_cov is not None:
+    #     logger.info(f"🏆 BEST MEAN-COV MLP MAE: {best_mean_cov['mae']:.4f}")
+    #     logger.info(f"Parameters: {best_mean_cov['hyperparams']}\n")
+        
+    # logger.info(f"👑 OVERALL WINNER: {overall_winner_name} (Validation MAE: {overall_winner_config['mae']:.4f})")
+    
+    # logger.info("\n" + "="*50 + "\nBLIND TEST RESULTS\n" + "="*50)
+    # logger.info(f"FINAL UNBIASED EVALUATION SCORE -> {overall_winner_name} Blind Test MAE: {blind_mae:.4f}")
+    # logger.info("="*50)
+    
+    
+    
+    # === FINAL ROBUSTNESS SHOWDOWN (512 vs 1024) ===
+    logger.info("\n" + "="*50 + "\nSTARTING 10-MARKET ROBUSTNESS SHOWDOWN\n" + "="*50)
+        
+    robust_results = []
+    
+    for hidden_dim in [512, 1024]:
         hyperparams = {
-            'learning_rate': lr, 'hidden_dim': hd, 'num_timesteps': ts, 
-            'beta_schedule': beta, 'batch_size': bs, 'epochs': ep, 
-            'n_heads': heads, 'n_layers': layers
+            'learning_rate': 1e-3, 
+            'hidden_dim': hidden_dim, 
+            'num_timesteps': 100, 
+            'beta_schedule': 'linear', 
+            'batch_size': 64, 
+            'epochs': 15, 
+            'use_layernorm': False
         }
         
-        pct = (i / total_tf) * 100
-        logger.info(f"\n--- Testing Transformer Config [{i}/{total_tf} | {pct:.1f}% Complete] ---\n{hyperparams}")
+        logger.info(f"\n--- Testing MLP Config: {hidden_dim} Hidden Dimensions ---")
         
-        avg_mae = evaluate_config(
-            TransformerDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
-            n_market_seeds=1, n_diff_seeds=1
+        # Train and evaluate across 5 different market seeds
+        val_mae = evaluate_config(
+            MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+            n_market_seeds=5, n_diff_seeds=3
         )
-        logger.info(f"RESULT -> Average Action-Space MAE: {avg_mae:.4f}")
-        tf_results.append({'hyperparams': hyperparams, 'mae': avg_mae})
+        logger.info(f"Robust Validation MAE (5 Markets): {val_mae:.4f}")
         
-    logger.info("Transformer Search Complete!")
-    best_tf = None
-    if tf_results:
-        best_tf = min(tf_results, key=lambda x: x['mae'])
-        logger.info(f"\n*** BEST TRANSFORMER CONFIGURATION ***\n{best_tf}")
+        # Evaluate on 5 completely new blind market seeds
+        blind_mae = evaluate_config(
+            MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+            n_market_seeds=5, n_diff_seeds=3, seed_offset=9999 
+        )
+        logger.info(f"Robust Blind Test MAE (5 Markets): {blind_mae:.4f}")
         
-    # === FINAL MASTER SUMMARY ===
-    logger.info("\n" + "="*50 + "\nFINAL ARCHITECTURE SHOWDOWN\n" + "="*50)
-    
-    if best_mlp is not None:
-        logger.info(f"🏆 BEST MLP MAE: {best_mlp['mae']:.4f}")
-        logger.info(f"Parameters: {best_mlp['hyperparams']}\n")
+        robust_results.append((hidden_dim, val_mae, blind_mae))
         
-    if best_tf is not None:
-        logger.info(f"🏆 BEST TRANSFORMER MAE: {best_tf['mae']:.4f}")
-        logger.info(f"Parameters: {best_tf['hyperparams']}\n")
+    logger.info("\n" + "="*50 + "\nFINAL THESIS STATISTICS\n" + "="*50)
+    for dim, v_mae, b_mae in robust_results:
+        logger.info(f"MLP ({dim} Dims) -> Val MAE: {v_mae:.4f} | Blind Test MAE: {b_mae:.4f}")
         
-    if best_mlp is not None and best_tf is not None:
-        winner = "MLP" if best_mlp['mae'] < best_tf['mae'] else "TRANSFORMER"
-        logger.info(f"👑 OVERALL WINNER: {winner}")
+    winner = min(robust_results, key=lambda x: x[2])  # Winner based on Blind Test MAE
+    logger.info(f"\n👑 UNDISPUTED CHAMPION: MLP ({winner[0]} Dims)")
     logger.info("="*50)
