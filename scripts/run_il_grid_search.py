@@ -35,7 +35,7 @@ def prepare_market_data(config, hmm_dist="gaussian", sim_dist="gaussian"):
     hmm.fit(data[market_ticker])
     
     hmm.epsilon = 0.001
-    hmm.lambd = 40
+    hmm.lambd = 0
     
     sim_model = SingleIndexModel(tickers=stock_tickers, emission_dist=sim_dist)
     sim_model.fit(data[stock_tickers], data[market_ticker])
@@ -340,44 +340,35 @@ if __name__ == "__main__":
     
     
     
-    # === FINAL ROBUSTNESS SHOWDOWN (512 vs 1024) ===
-    logger.info("\n" + "="*50 + "\nSTARTING 10-MARKET ROBUSTNESS SHOWDOWN\n" + "="*50)
+    # === MEAN-COV NORMALIZATION CHECK ===
+    logger.info("\n" + "="*50 + "\nTESTING NORMALIZED MEAN-COV BASELINE\n" + "="*50)
         
-    robust_results = []
+    base_hyperparams = {
+        'learning_rate': 1e-3, 
+        'num_timesteps': 100, 
+        'beta_schedule': 'linear', 
+        'batch_size': 64, 
+        'epochs': 15, 
+        'use_layernorm': False
+    }
     
+    # 1. Benchmark our reigning champion
+    logger.info("\n--- Validating Standard MLP (1024 Dims) ---")
+    mlp_params = base_hyperparams.copy()
+    mlp_params['hidden_dim'] = 1024
+    mlp_val_mae = evaluate_config(
+        MLPDenoiser, mlp_params, config, hmm, sim_model, stock_tickers,
+        n_market_seeds=5, n_diff_seeds=3
+    )
+    logger.info(f"Standard MLP (1024) Val MAE: {mlp_val_mae:.4f}")
+    
+    # 2. Test the normalized baseline at multiple capacities
     for hidden_dim in [512, 1024]:
-        hyperparams = {
-            'learning_rate': 1e-3, 
-            'hidden_dim': hidden_dim, 
-            'num_timesteps': 100, 
-            'beta_schedule': 'linear', 
-            'batch_size': 64, 
-            'epochs': 15, 
-            'use_layernorm': False
-        }
-        
-        logger.info(f"\n--- Testing MLP Config: {hidden_dim} Hidden Dimensions ---")
-        
-        # Train and evaluate across 5 different market seeds
-        val_mae = evaluate_config(
-            MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
+        logger.info(f"\n--- Validating Normalized Mean-Cov MLP ({hidden_dim} Dims) ---")
+        meancov_params = base_hyperparams.copy()
+        meancov_params['hidden_dim'] = hidden_dim
+        meancov_val_mae = evaluate_config(
+            MeanCovMLPDenoiser, meancov_params, config, hmm, sim_model, stock_tickers,
             n_market_seeds=5, n_diff_seeds=3
         )
-        logger.info(f"Robust Validation MAE (5 Markets): {val_mae:.4f}")
-        
-        # Evaluate on 5 completely new blind market seeds
-        blind_mae = evaluate_config(
-            MLPDenoiser, hyperparams, config, hmm, sim_model, stock_tickers,
-            n_market_seeds=5, n_diff_seeds=3, seed_offset=9999 
-        )
-        logger.info(f"Robust Blind Test MAE (5 Markets): {blind_mae:.4f}")
-        
-        robust_results.append((hidden_dim, val_mae, blind_mae))
-        
-    logger.info("\n" + "="*50 + "\nFINAL THESIS STATISTICS\n" + "="*50)
-    for dim, v_mae, b_mae in robust_results:
-        logger.info(f"MLP ({dim} Dims) -> Val MAE: {v_mae:.4f} | Blind Test MAE: {b_mae:.4f}")
-        
-    winner = min(robust_results, key=lambda x: x[2])  # Winner based on Blind Test MAE
-    logger.info(f"\n👑 UNDISPUTED CHAMPION: MLP ({winner[0]} Dims)")
-    logger.info("="*50)
+        logger.info(f"Normalized Mean-Cov MLP ({hidden_dim}) Val MAE: {meancov_val_mae:.4f}")
