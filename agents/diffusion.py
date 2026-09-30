@@ -79,15 +79,24 @@ class MeanCovMLPDenoiser(nn.Module):
         """
         A control benchmark architecture that bypasses representation learning.
         It calculates the Mean and Covariance explicitly from the raw state tensor
-        and feeds those flattened features directly to the MLP.
+        and normalizes these flattened features before feeding them directly to the MLP.
         """
         super().__init__()
         self.t_dim = t_dim
         
-        # n_assets (Means) + n_assets*n_assets (Covariances)
+        # 1. Calculate the dimensionality of the extracted features: n_assets (Means) + n_assets*n_assets (Covariances)
         extracted_features_dim = n_assets + (n_assets * n_assets)
+        
+        # 2. Instantiate a 1D Batch Normalization layer.
+        # Standardizes explicitly extracted features across the batch to ensure scale equivalence 
+        # between Mean vectors and Covariance matrices prior to linear projection.
+        # eps=1e-10 overrides PyTorch's default to prevent drowning out tiny financial variances.
+        self.feature_norm = nn.BatchNorm1d(extracted_features_dim, eps=1e-10)
+        
+        # 3. Calculate total input dimension for the MLP
         in_dim = extracted_features_dim + action_dim + t_dim
         
+        # 4. Construct the Neural Network layers
         layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
         if use_layernorm:
             layers.append(nn.LayerNorm(hidden_dim))
@@ -139,11 +148,19 @@ class MeanCovMLPDenoiser(nn.Module):
         # 1. Intercept the raw state and extract Mean/Covariance features
         features = self._compute_mean_and_cov(state)
         
-        # 2. Embed Time
-        t_embed = self.time_embedding(t)
+        # 2. Normalize features (safeguarding against batch size of 1 during training)
+        if features.shape[0] > 1 or not self.training:
+            features = self.feature_norm(features)
         
-        # 3. Combine and pass to the Neural Network
-        x = torch.cat([features, action_noisy, t_embed], dim=-1)
+        # 3. Embed Time
+        half_dim = self.t_dim // 2
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=t.device) * -embeddings)
+        embeddings = t * embeddings
+        t_embed = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        
+        # 4. Combine and pass to the Neural Network
+        x = torch.cat((features, action_noisy, t_embed), dim=-1)
         return self.net(x)
 
 class TransformerDenoiser(nn.Module):

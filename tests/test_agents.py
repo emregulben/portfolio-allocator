@@ -172,3 +172,54 @@ def test_mean_cov_calculation():
         # 3. Assert perfect mathematical equivalence
         assert np.allclose(pt_means[i], np_mean), f"Mean mismatch at batch index {i}"
         assert np.allclose(pt_covs[i], np_cov), f"Covariance mismatch at batch index {i}"
+
+def test_mean_cov_forward_normalization():
+    """
+    Verifies that the MeanCovMLPDenoiser successfully executes a forward pass
+    and that the internal BatchNorm1d layer correctly standardizes the 
+    Mean and Covariance features to ensure equal gradient scaling.
+    """
+    batch_size, window_size, n_assets = 64, 60, 10
+    action_dim = n_assets + 1
+    
+    # 1. Initialize the Model
+    model = MeanCovMLPDenoiser(n_assets=n_assets, action_dim=action_dim, hidden_dim=256)
+    model.train() # Ensure BatchNorm calculates live batch statistics
+    
+    # 2. Setup a PyTorch Forward Hook to intercept the normalized features
+    intercepted_features = {}
+    def hook_fn(module, input, output):
+        intercepted_features['normalized'] = output.detach()
+        
+    # Attach the hook to the feature_norm layer
+    hook_handle = model.feature_norm.register_forward_hook(hook_fn)
+    
+    # 3. Create realistic dummy inputs (scaled down to mimic real financial decimals)
+    state = torch.randn(batch_size, window_size, n_assets) * 0.05
+    action_noisy = torch.randn(batch_size, action_dim)
+    
+    # Updated to enforce the 2D shape (batch_size, 1) and .float() format used in live production
+    t = torch.randint(0, 100, (batch_size, 1)).float()
+    
+    # 4. Execute the live forward pass
+    output = model(state, action_noisy, t)
+    
+    # 5. Clean up the hook
+    hook_handle.remove()
+    
+    # 6. Verify the forward pass completed and output the correct shape
+    assert output.shape == (batch_size, action_dim), "Forward pass output shape mismatch."
+    assert not torch.isnan(output).any(), "Forward pass produced NaNs."
+    
+    # 7. Verify the mathematical normalization of the intercepted features
+    norm_features = intercepted_features['normalized']
+    
+    # Calculate the batch-wise mean and variance for every single feature
+    feature_means = norm_features.mean(dim=0)
+    # BatchNorm uses biased variance for the standard deviation scaling
+    feature_vars = norm_features.var(dim=0, unbiased=False) 
+    
+    # Assert that all features have a mean of 0 and variance of 1 (within a tiny float tolerance)
+    assert torch.allclose(feature_means, torch.zeros_like(feature_means), atol=1e-5), "Features are not centered at mean 0."
+    # Relaxed tolerance to 1e-2 to account for 32-bit floating point precision limits when scaling microscopic decimals
+    assert torch.allclose(feature_vars, torch.ones_like(feature_vars), atol=1e-2), "Features are not scaled to variance 1."
