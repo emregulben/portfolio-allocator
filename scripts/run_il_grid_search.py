@@ -34,8 +34,8 @@ def prepare_market_data(config, hmm_dist="gaussian", sim_dist="gaussian"):
     hmm = HybridJumpsHMM(n_states=config["hmm"]["n_states"], emission_dist=hmm_dist)
     hmm.fit(data[market_ticker])
     
-    hmm.epsilon = 0.001
-    hmm.lambd = 0
+    hmm.epsilon = 0.0
+    hmm.lambd = 0.0
     
     sim_model = SingleIndexModel(tickers=stock_tickers, emission_dist=sim_dist)
     sim_model.fit(data[stock_tickers], data[market_ticker])
