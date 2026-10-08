@@ -57,3 +57,21 @@ il:
   batch_size: 64
   learning_rate: 0.0001
   epochs: 150
+
+# ---------------------------------------------------------
+# 5. Reinforcement Learning Configuration (AWR)
+# ---------------------------------------------------------
+rl:
+  # The temperature parameter. Lower means stricter filtering (only cloning the absolute best)
+  beta: 0.05
+  # Maximum allowed AWR weight to prevent network explosion
+  weight_clip: 20.0
+  # RL Fine-tuning Hyperparameters
+  batch_size: 256
+  learning_rate: 0.0001
+  # The number of RL iterations (rounds of Generate -> Filter -> Finetune)
+  iterations: 5
+  # The number of epochs the network trains on the filtered buffer during one iteration
+  epochs_per_iteration: 5
+  # How many trajectories the agent simulates per iteration to gather experience
+  trajectories_per_iteration: 100
