@@ -278,10 +278,11 @@ class PortDiff(nn.Module):
         self.register_buffer("alphas_cumprod", alphas_cumprod)
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
-        
-    def forward(self, state, action_clean):
+
+    def forward(self, state, action_clean, weights=None):
         """
         TRAINING ONLY: Calculates the loss by adding noise and asking the denoiser to guess it.
+        Accepts optional AWR weights for Reinforcement Learning.
         """
         batch_size = state.shape[0]
         
@@ -299,9 +300,18 @@ class PortDiff(nn.Module):
         # 4. Ask the MLPDenoiser to guess the noise we just added
         predicted_noise = self.denoiser(state, action_noisy, t.unsqueeze(-1).float())
         
-        # 5. Return the Mean Squared Error (MSE) between the true noise and the guessed noise
-        loss = F.mse_loss(predicted_noise, noise)
-        return loss
+        # 5. Calculate MSE without instantly averaging it (reduction='none')
+        loss = F.mse_loss(predicted_noise, noise, reduction='none')
+        
+        # Average the loss across the asset dimension, keeping it per-sample in the batch
+        loss = loss.mean(dim=-1) 
+        
+        # 6. Apply Advantage weights if we are doing RL (AWR)
+        if weights is not None:
+            loss = loss * weights.squeeze()
+            
+        # Finally, return the average loss of the batch
+        return loss.mean()
     
     @torch.no_grad()
     def sample(self, state):

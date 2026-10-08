@@ -127,6 +127,11 @@ if __name__ == "__main__":
     logger.info("\nTraining Complete! Permanently freezing model weights for blind evaluation...")
     trained_model.eval()
     
+    # Save the Winner IL Model to the hard drive so RL can load it later
+    model_path = os.path.join(root_dir, "il_winner.pth")
+    torch.save(trained_model.state_dict(), model_path)
+    logger.info(f"Saved IL Winner to {model_path}")
+    
     logger.info("Generating 5 Completely Unseen Test Markets (Seed Offset = 9999)...")
     test_dataset = generate_combined_dataset(config, hmm, sim_model, n_seeds=5, seed_offset=9999)
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
