@@ -170,6 +170,35 @@ def run_rl():
         for i in range(len(buffer.advantages)):
             buffer.advantages[i] = buffer.advantages[i] - mean_noisy_sharpe
             
+        # ---------------------------------------------------------
+        # Weight Diagnostics & Effective Sample Size
+        # ---------------------------------------------------------
+        # Convert list of tensors into one massive tensor for fast PyTorch math
+        adv_tensor = torch.cat(buffer.advantages, dim=0)
+        
+        # Calculate theoretical weights before clipping
+        raw_weights = torch.exp(adv_tensor / rl_cfg["beta"])
+        
+        # Calculate fraction of weights exceeding the maximum cap
+        clip_max = rl_cfg["weight_clip"]
+        clip_rate = (raw_weights >= clip_max).float().mean().item()
+        
+        # Apply the clip to calculate actual weights used by the neural net
+        clipped_weights = torch.clamp(raw_weights, max=clip_max)
+        
+        # Effective Sample Size (N_eff) calculation
+        n_eff = (clipped_weights.sum() ** 2) / (clipped_weights ** 2).sum()
+        
+        logger.info(f"Diagnostics | Clipping Rate: {clip_rate*100:.2f}% | N_eff: {n_eff.item():.2f} / {len(raw_weights)}")
+        
+        # Calculate quantiles (25th, 50th/Median, 75th, 90th, 99th)
+        adv_q = torch.quantile(adv_tensor, torch.tensor([0.25, 0.5, 0.75, 0.90, 0.99]))
+        w_q = torch.quantile(clipped_weights, torch.tensor([0.25, 0.5, 0.75, 0.90, 0.99]))
+        
+        logger.info(f"Advantage Quantiles [25, 50, 75, 90, 99]: {[round(x, 4) for x in adv_q.tolist()]}")
+        logger.info(f"Weight Quantiles    [25, 50, 75, 90, 99]: {[round(x, 4) for x in w_q.tolist()]}")
+        # ---------------------------------------------------------
+
         # Compile and Train
         buffer.compile_buffer()
         trainer.train(epochs=rl_cfg["epochs_per_iteration"])
