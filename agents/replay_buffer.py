@@ -15,17 +15,23 @@ class AWRReplayBuffer(Dataset):
 
     def add_trajectory(self, states, actions, advantage):
         """
-        Adds a full 5-year trajectory to the buffer.
-        
+        Appends a trajectory segment or chunk to the replay buffer, supporting
+        both trajectory-level and step-level (daily) advantage signals.
+
         Args:
-            states (torch.Tensor): The 3D tensor of historical market windows.
-            actions (torch.Tensor): The 2D tensor of portfolios the agent executed.
-            advantage (float): The single scalar score for how this entire 
-                               trajectory performed compared to the batch average.
+            states (torch.Tensor): Historical market feature windows of shape (num_steps, window_size, n_assets).
+            actions (torch.Tensor): Portfolio allocations executed by the policy of shape (num_steps, action_dim).
+            advantage (Union[float, torch.Tensor]): Advantage signal for credit assignment. Can be either:
+                - A scalar float: broadcasted uniformly across all steps in the
+                  chunk (used for trajectory-level metrics such as the Sharpe ratio).
+                - A 1D or 2D torch.Tensor of shape (num_steps,) or (num_steps, 1):
+                  provides localized per-step advantage values (used for daily 
+                  utility-based credit assignment).
         """
-        # The Sharpe Ratio judges the entire 5-year performance as a whole.
-        # So we attach the exact same scalar advantage to every single trading day in this trajectory.
-        advantage_tensor = torch.full((len(states), 1), advantage, dtype=torch.float32)
+        if isinstance(advantage, torch.Tensor) and advantage.numel() == len(states):
+            advantage_tensor = advantage.view(-1, 1).float().cpu()
+        else:
+            advantage_tensor = torch.full((len(states), 1), float(advantage), dtype=torch.float32)
         
         self.states.append(states.cpu())
         self.actions.append(actions.cpu())

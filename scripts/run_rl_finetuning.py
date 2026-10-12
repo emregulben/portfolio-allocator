@@ -26,6 +26,40 @@ def setup_logger(name):
         logger.addHandler(ch)
     return logger
 
+def compute_daily_utility(actions, returns, states, gamma=2.0, cost_c=0.0005):
+    """
+    Computes localized daily mean-variance utility with transaction costs:
+        r_tilde_t = w_t^T r_{t+1} - (gamma / 2) * w_t^T Sigma_t w_t - c * ||w_t - w_{t-1}||_1
+
+    Args:
+        actions (torch.Tensor): Portfolio weights of shape (T, action_dim).
+        returns (torch.Tensor): Realized returns of shape (T, action_dim).
+        states (torch.Tensor): Rolling return windows of shape (T, window_size, n_assets).
+        gamma (float): Risk aversion coefficient.
+        cost_c (float): Proportional transaction cost parameter.
+
+    Returns:
+        torch.Tensor: Daily utility values of shape (T,).
+    """
+    # 1. Daily Portfolio Return: w_t^T r_{t+1}
+    portfolio_return = (actions * returns).sum(dim=1)
+    
+    # 2. Rolling Covariance Matrix: Sigma_t from states available at decision time
+    mu = states.mean(dim=1, keepdim=True)
+    centered = states - mu
+    cov = torch.bmm(centered.transpose(1, 2), centered) / (states.shape[1] - 1)
+    
+    # Risky asset weights (excluding cash)
+    w_risky = actions[:, :-1].unsqueeze(1)
+    portfolio_variance = torch.bmm(torch.bmm(w_risky, cov), w_risky.transpose(1, 2)).view(-1)
+    
+    # 3. Transaction Costs: c * ||w_t - w_{t-1}||_1
+    turnover = torch.zeros(len(actions), device=actions.device)
+    if len(actions) > 1:
+        turnover[1:] = torch.norm(actions[1:] - actions[:-1], p=1, dim=1)
+        
+    return portfolio_return - (gamma / 2.0) * portfolio_variance - cost_c * turnover
+
 def run_rl():
     logger = setup_logger("RL_Finetuning")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,6 +116,8 @@ def run_rl():
     
     window = config["expert"]["rolling_window"]
     daily_rf = config["expert"]["annual_risk_free_rate"] / 252.0
+    gamma = config["expert"]["risk_aversion"]
+    cost_c = config["expert"]["transaction_cost"]
     
     # 4. Main RL Loop
     logger.info(f"Starting AWR Reinforcement Learning for {rl_cfg['iterations']} Iterations...")
@@ -98,7 +134,7 @@ def run_rl():
             seed = iteration * 1000 + traj
             np.random.seed(seed)
             
-            # Simulate a completely new 5-year market
+            # Simulate a completely new 10-year market
             sim_states = hmm.simulate_states(
                 n_steps=config["hmm"]["simulation"]["n_steps"], 
                 epsilon=hmm.epsilon, 
@@ -156,19 +192,30 @@ def run_rl():
                 n_sharpe = (n_ret.mean() / (n_ret.std() + 1e-9)).item() * np.sqrt(252)
                 iteration_noisy_sharpes.append(n_sharpe)
                 
-                # 3. Store this specific year as an independent memory
-                buffer.add_trajectory(chunk_states, chunk_noisy_actions, n_sharpe)
+                # 3. Localized Daily Utility & Paired Advantage
+                c_utility = compute_daily_utility(chunk_clean_actions, chunk_returns, chunk_states, gamma=gamma, cost_c=cost_c)
+                n_utility = compute_daily_utility(chunk_noisy_actions, chunk_returns, chunk_states, gamma=gamma, cost_c=cost_c)
+                daily_advantage = n_utility - c_utility
+                
+                buffer.add_trajectory(chunk_states, chunk_noisy_actions, daily_advantage)
         
-        # FILTERING: Calculate Advantage
+        # Financial Evaluation Metrics
         mean_clean_sharpe = np.mean(iteration_clean_sharpes)
         mean_noisy_sharpe = np.mean(iteration_noisy_sharpes)
         max_noisy_sharpe = np.max(iteration_noisy_sharpes)
+        mean_paired_sharpe = mean_noisy_sharpe - mean_clean_sharpe
         
-        logger.info(f"Baseline IL Sharpe: {mean_clean_sharpe:.4f} | RL Exploration Mean: {mean_noisy_sharpe:.4f} | Max: {max_noisy_sharpe:.4f}")
+        logger.info(
+            f"Baseline IL Sharpe: {mean_clean_sharpe:.4f} | RL Exploration Mean: {mean_noisy_sharpe:.4f} | "
+            f"Max: {max_noisy_sharpe:.4f} | Paired Sharpe Delta: {mean_paired_sharpe:.4f}"
+        )
         
-        # Calculate A = R - Mean(R) directly inside the buffer
+        # Advantage Normalization
+        all_adv = torch.cat(buffer.advantages, dim=0)
+        adv_mean = all_adv.mean()
+        adv_std = all_adv.std() + 1e-8
         for i in range(len(buffer.advantages)):
-            buffer.advantages[i] = buffer.advantages[i] - mean_noisy_sharpe
+            buffer.advantages[i] = (buffer.advantages[i] - adv_mean) / adv_std
             
         # ---------------------------------------------------------
         # Weight Diagnostics & Effective Sample Size

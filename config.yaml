@@ -41,6 +41,8 @@ expert:
   max_weight: 0.20
   # Baseline annual return rate for cash (e.g., 0.04 = 4% Treasury yield)
   annual_risk_free_rate: 0.0
+  # Proportional transaction cost parameter (0.0005 = 5 basis points per unit turnover)
+  transaction_cost: 0.0005
 
 # ---------------------------------------------------------
 # 4. Imitation Learning Configuration (PortDiff)
@@ -63,7 +65,7 @@ il:
 # ---------------------------------------------------------
 rl:
   # The temperature parameter. Lower means stricter filtering (only cloning the absolute best)
-  beta: 0.05
+  beta: 1.0
   # Maximum allowed AWR weight to prevent network explosion
   weight_clip: 20.0
   # RL Fine-tuning Hyperparameters
