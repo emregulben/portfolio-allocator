@@ -28,11 +28,11 @@ def setup_logger(name):
 
 def compute_daily_utility(actions, returns, states, gamma=2.0, cost_c=0.0005):
     """
-    Computes localized daily mean-variance utility with transaction costs:
-        r_tilde_t = w_t^T r_{t+1} - (gamma / 2) * w_t^T Sigma_t w_t - c * ||w_t - w_{t-1}||_1
+    Computes localized daily mean-variance utility with drift-adjusted transaction costs:
+        r_tilde_t = w_t^T r_{t+1} - (gamma / 2) * w_t^T Sigma_t w_t - c * ||w_t - w_{t-1}^+||_1
 
     Args:
-        actions (torch.Tensor): Portfolio weights of shape (T, action_dim).
+        actions (torch.Tensor): Target portfolio weights of shape (T, action_dim).
         returns (torch.Tensor): Realized returns of shape (T, action_dim).
         states (torch.Tensor): Rolling return windows of shape (T, window_size, n_assets).
         gamma (float): Risk aversion coefficient.
@@ -43,21 +43,30 @@ def compute_daily_utility(actions, returns, states, gamma=2.0, cost_c=0.0005):
     """
     # 1. Daily Portfolio Return: w_t^T r_{t+1}
     portfolio_return = (actions * returns).sum(dim=1)
-    
+
     # 2. Rolling Covariance Matrix: Sigma_t from states available at decision time
     mu = states.mean(dim=1, keepdim=True)
     centered = states - mu
     cov = torch.bmm(centered.transpose(1, 2), centered) / (states.shape[1] - 1)
-    
+
     # Risky asset weights (excluding cash)
     w_risky = actions[:, :-1].unsqueeze(1)
     portfolio_variance = torch.bmm(torch.bmm(w_risky, cov), w_risky.transpose(1, 2)).view(-1)
-    
-    # 3. Transaction Costs: c * ||w_t - w_{t-1}||_1
+
+    # 3. Transaction Costs Accounting for Portfolio Drift
     turnover = torch.zeros(len(actions), device=actions.device)
     if len(actions) > 1:
-        turnover[1:] = torch.norm(actions[1:] - actions[:-1], p=1, dim=1)
-        
+        w_prev = actions[:-1]
+        r_prev = returns[:-1]
+        gross_ret_prev = portfolio_return[:-1].unsqueeze(1)
+
+        # Drifted weights at the end of period t-1 prior to rebalancing
+        denom = torch.clamp(1.0 + gross_ret_prev, min=1e-8)
+        w_prev_drifted = (w_prev * (1.0 + r_prev)) / denom
+
+        # Turnover required to move from drifted weights to new target weights
+        turnover[1:] = torch.norm(actions[1:] - w_prev_drifted, p=1, dim=1)
+
     return portfolio_return - (gamma / 2.0) * portfolio_variance - cost_c * turnover
 
 def run_rl():

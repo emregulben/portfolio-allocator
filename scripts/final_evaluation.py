@@ -30,10 +30,11 @@ def setup_logger(name):
 
 def compute_portfolio_metrics(weights_arr, returns_arr, cost_c=0.0005):
     """
-    Computes institutional risk, return, and execution metrics from daily allocations.
+    Computes institutional risk, return, and execution metrics from daily allocations,
+    accounting for asset price drift between consecutive rebalancing periods.
 
     Args:
-        weights_arr (np.ndarray): Daily portfolio allocations of shape (T, action_dim).
+        weights_arr (np.ndarray): Target portfolio allocations of shape (T, action_dim).
         returns_arr (np.ndarray): Realized asset returns of shape (T, action_dim).
         cost_c (float): Proportional transaction cost parameter per unit turnover.
 
@@ -41,40 +42,48 @@ def compute_portfolio_metrics(weights_arr, returns_arr, cost_c=0.0005):
         dict: Dictionary containing gross/net returns, Sharpe, Sortino, MDD, and turnover.
     """
     T = len(weights_arr)
-    
+
     # 1. Daily Gross Returns: w_t^T r_{t+1}
     gross_returns = np.sum(weights_arr * returns_arr, axis=1)
-    
-    # 2. Daily Turnover and Net Returns
+
+    # 2. Daily Turnover Accounting for Portfolio Drift
     turnover = np.zeros(T)
     if T > 1:
-        turnover[1:] = np.sum(np.abs(weights_arr[1:] - weights_arr[:-1]), axis=1)
-        
+        w_prev = weights_arr[:-1]
+        r_prev = returns_arr[:-1]
+        gross_ret_prev = gross_returns[:-1, np.newaxis]
+
+        # Drifted weights at the end of period t-1 prior to rebalancing
+        w_prev_drifted = (w_prev * (1.0 + r_prev)) / np.maximum(1.0 + gross_ret_prev, 1e-8)
+
+        # Turnover required to move from drifted weights to new target weights
+        turnover[1:] = np.sum(np.abs(weights_arr[1:] - w_prev_drifted), axis=1)
+
     net_returns = gross_returns - cost_c * turnover
-    
+
     # 3. Annualized Returns & Volatilities
     ann_net_return = np.mean(net_returns) * 252.0
     ann_net_vol = np.std(net_returns) * np.sqrt(252.0) + 1e-9
     ann_gross_vol = np.std(gross_returns) * np.sqrt(252.0) + 1e-9
-    
+
     # 4. Gross and Net Sharpe Ratios
     gross_sharpe = (np.mean(gross_returns) * 252.0) / ann_gross_vol
     net_sharpe = ann_net_return / ann_net_vol
-    
+
     # 5. Net Sortino Ratio (downside deviation only)
     downside_returns = np.minimum(net_returns, 0.0)
     downside_vol = np.sqrt(np.mean(downside_returns ** 2)) * np.sqrt(252.0) + 1e-9
     net_sortino = ann_net_return / downside_vol
-    
+
     # 6. Maximum Drawdown (MDD) from cumulative wealth
     cum_wealth = np.cumprod(1.0 + net_returns)
     running_max = np.maximum.accumulate(cum_wealth)
     drawdowns = (cum_wealth - running_max) / running_max
-    max_drawdown = np.min(drawdowns)  # negative percentage
-    
+    max_drawdown = np.min(drawdowns)
+
     # 7. Average Daily Turnover
     mean_turnover = np.mean(turnover[1:]) if T > 1 else 0.0
-    
+
     return {
         "net_return": float(ann_net_return),
         "gross_sharpe": float(gross_sharpe),
