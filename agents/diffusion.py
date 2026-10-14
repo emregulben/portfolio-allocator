@@ -3,12 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-def map_to_feasible_portfolio(action_t, max_weight=0.20):
+def map_to_feasible_portfolio(action_t: torch.Tensor, max_weight: float = 0.20) -> torch.Tensor:
     """Enforces Markowitz constraints by safely parking illegal excess into Cash."""
     w = torch.clamp(action_t, min=0.0)
-    w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
+    w_sum = w.sum(dim=-1, keepdim=True)
+
+    # If all raw signals are non-positive, allocate 100% to Cash
+    zero_mask = w_sum < 1e-7
+    w = torch.where(zero_mask, torch.zeros_like(w), w / (w_sum + 1e-9))
     w_risky = w[:, :-1]
-    w_cash = w[:, -1:]
+    w_cash = torch.where(zero_mask, torch.ones_like(w[:, -1:]), w[:, -1:])
+
     excess = torch.clamp(w_risky - max_weight, min=0.0)
     w_risky_clipped = w_risky - excess
     w_cash_new = w_cash + excess.sum(dim=-1, keepdim=True)
@@ -314,38 +319,62 @@ class PortDiff(nn.Module):
         return loss.mean()
     
     @torch.no_grad()
-    def sample(self, state):
+    def sample(self, state: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """
-        INFERENCE ONLY (Real World): Starts with pure noise and denoises it step-by-step to get portfolio weights.
+        INFERENCE ONLY (Real World): Denoises Gaussian noise into portfolio weights conditional on the market state.
+
+        Supports two reverse sampling modes:
+        - Stochastic (DDPM): Injects noise at each reverse step (sigma_t > 0).
+        - Deterministic (DDIM): Sets reverse noise to zero (sigma_t = 0) with a fixed 
+          initial latent, ensuring identical states yield identical portfolio weights.
+
+        Args:
+            state: Market state tensor of shape (batch_size, state_dim).
+            deterministic: If True, uses deterministic sampling. If False, uses stochastic sampling.
+
+        Returns:
+            Feasible portfolio weight tensor of shape (batch_size, action_dim).
         """
         batch_size = state.shape[0]
-        # We find out how many assets there are by looking at the last layer of the denoiser
         action_dim = self.denoiser.net[-1].out_features
-        
-        # 1. Start with completely random pure Gaussian noise
-        action_t = torch.randn((batch_size, action_dim), device=state.device)
-        
-        # 2. Loop backwards from T-1 down to 0
+
+        # Initialize latent state at t = T
+        if deterministic:
+            generator = torch.Generator(device=state.device)
+            generator.manual_seed(42)
+            action_t = torch.randn(
+                (batch_size, action_dim),
+                generator=generator,
+                device=state.device,
+                dtype=torch.float32,
+            )
+        else:
+            action_t = torch.randn(
+                (batch_size, action_dim),
+                device=state.device,
+                dtype=torch.float32,
+            )
+
+        # Reverse diffusion trajectory from T-1 down to 0
         for t_step in reversed(range(self.num_timesteps)):
             t = torch.full((batch_size, 1), t_step, device=state.device, dtype=torch.float32)
-            
-            # Predict the noise using our trained denoiser
+
             predicted_noise = self.denoiser(state, action_t, t)
-            
-            # Math to subtract a fraction of the noise based on the timestep schedule
-            alpha_t = (1.0 - self.betas[t_step])
+
+            alpha_t = 1.0 - self.betas[t_step]
             sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_step]
-            
-            # Remove the predicted noise
-            action_t = (action_t - (1.0 - alpha_t) / sqrt_one_minus_alpha_cumprod_t * predicted_noise) / torch.sqrt(alpha_t)
-            
-            # If we aren't at the very last step, add a tiny bit of random noise back in 
-            # (this prevents the model from collapsing to a single point, a key diffusion trick)
-            if t_step > 0:
+
+            # Mean reverse step
+            action_t = (
+                action_t - (1.0 - alpha_t) / sqrt_one_minus_alpha_cumprod_t * predicted_noise
+            ) / torch.sqrt(alpha_t)
+
+            # Stochastic perturbation (omitted in deterministic mode)
+            if not deterministic and t_step > 0:
                 noise = torch.randn_like(action_t)
                 sigma_t = torch.sqrt(self.betas[t_step])
                 action_t = action_t + sigma_t * noise
-                
-        # 3. Custom Feasibility Mapping: Enforce Markowitz constraints
+
+        # Custom Feasibility Mapping: Enforce Markowitz constraints
         final_weights = map_to_feasible_portfolio(action_t, max_weight=0.20)
         return final_weights

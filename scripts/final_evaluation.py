@@ -165,18 +165,29 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     daily_rf = config["expert"]["annual_risk_free_rate"] / 252.0
     stock_tickers = config["data"]["stock_tickers"]
     
-    results = {
-        "markowitz": [],
-        "il_winner": [],
-        "rl_winner": []
+    policy_keys = [
+        "markowitz",
+        "il_stochastic",
+        "il_deterministic",
+        "rl_stochastic",
+        "rl_deterministic",
+    ]
+    policy_headers = {
+        "markowitz": "Markowitz",
+        "il_stochastic": "IL (Stochastic)",
+        "il_deterministic": "IL (Deterministic)",
+        "rl_stochastic": "RL (Stochastic)",
+        "rl_deterministic": "RL (Deterministic)",
     }
-    
+
+    results = {k: [] for k in policy_keys}
+
     logger.info(f"Starting out-of-sample evaluation across {num_seeds} unseen seeds (seeds {start_seed} to {start_seed + num_seeds - 1})...")
-    
+
     for i in tqdm(range(num_seeds), desc="Evaluating Seeds"):
         seed = start_seed + i
         np.random.seed(seed)
-        
+
         # 1. Simulate Unseen 10-Year Market Path
         sim_states = hmm.simulate_states(
             n_steps=config["hmm"]["simulation"]["n_steps"],
@@ -184,30 +195,34 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
             lambd=hmm.lambd
         )
         sim_stocks = sim_model.simulate(hmm.decode_states(sim_states), random_seed=seed)
-        
+
         sim_stocks_with_cash = sim_stocks.copy()
         sim_stocks_with_cash['Cash'] = daily_rf
         actual_returns_arr = sim_stocks_with_cash.to_numpy()[window:]
-        
+
         # Prepare historical input tensor for diffusion models
         state_returns_arr = sim_stocks.to_numpy()
         X = [state_returns_arr[t - window : t] for t in range(window, len(state_returns_arr))]
         states_tensor = torch.tensor(np.array(X), dtype=torch.float32).to(device)
-        
+
         # 2. Evaluate Classical Markowitz Expert
         markowitz_df = expert.generate_labels(sim_stocks)
         w_markowitz = markowitz_df.to_numpy()
         results["markowitz"].append(compute_portfolio_metrics(w_markowitz, actual_returns_arr, cost_c=cost_c))
-        
-        # 3. Evaluate Frozen Imitation Learning Baseline
+
+        # 3. Evaluate Imitation Learning Baselines (Stochastic vs Deterministic)
         with torch.no_grad():
-            w_il = il_model.sample(states_tensor).cpu().numpy()
-        results["il_winner"].append(compute_portfolio_metrics(w_il, actual_returns_arr, cost_c=cost_c))
-        
-        # 4. Evaluate Fine-Tuned Reinforcement Learning Policy
+            w_il_stoch = il_model.sample(states_tensor, deterministic=False).cpu().numpy()
+            w_il_det = il_model.sample(states_tensor, deterministic=True).cpu().numpy()
+        results["il_stochastic"].append(compute_portfolio_metrics(w_il_stoch, actual_returns_arr, cost_c=cost_c))
+        results["il_deterministic"].append(compute_portfolio_metrics(w_il_det, actual_returns_arr, cost_c=cost_c))
+
+        # 4. Evaluate Reinforcement Learning Policies (Stochastic vs Deterministic)
         with torch.no_grad():
-            w_rl = rl_model.sample(states_tensor).cpu().numpy()
-        results["rl_winner"].append(compute_portfolio_metrics(w_rl, actual_returns_arr, cost_c=cost_c))
+            w_rl_stoch = rl_model.sample(states_tensor, deterministic=False).cpu().numpy()
+            w_rl_det = rl_model.sample(states_tensor, deterministic=True).cpu().numpy()
+        results["rl_stochastic"].append(compute_portfolio_metrics(w_rl_stoch, actual_returns_arr, cost_c=cost_c))
+        results["rl_deterministic"].append(compute_portfolio_metrics(w_rl_det, actual_returns_arr, cost_c=cost_c))
 
     # 5. Aggregate Statistical Results (Mean +/- Std)
     metrics_list = ["net_sharpe", "gross_sharpe", "net_sortino", "net_return", "max_drawdown", "mean_turnover"]
@@ -219,9 +234,9 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         "max_drawdown": "Maximum Drawdown",
         "mean_turnover": "Daily Turnover"
     }
-    
+
     summary = {}
-    for model_key in ["markowitz", "il_winner", "rl_winner"]:
+    for model_key in policy_keys:
         summary[model_key] = {}
         for m in metrics_list:
             vals = [r[m] for r in results[model_key]]
@@ -231,30 +246,32 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
             }
 
     # 6. Print Formatted Results Table
-    header = f"{'Metric':<22} | {'Markowitz Expert':<22} | {'IL Winner':<22} | {'RL Winner':<22}"
+    header_cols = [f"{'Metric':<20}"] + [f"{policy_headers[k]:<20}" for k in policy_keys]
+    header = " | ".join(header_cols)
     divider = "-" * len(header)
-    
+
     print("\n" + divider)
     print("OUT-OF-SAMPLE EVALUATION RESULTS (30 UNSEEN MARKET SEEDS)")
     print(divider)
     print(header)
     print(divider)
-    
+
     for m in metrics_list:
         label = metric_labels[m]
-        m_str = f"{summary['markowitz'][m]['mean']:.4f} +/- {summary['markowitz'][m]['std']:.4f}"
-        il_str = f"{summary['il_winner'][m]['mean']:.4f} +/- {summary['il_winner'][m]['std']:.4f}"
-        rl_str = f"{summary['rl_winner'][m]['mean']:.4f} +/- {summary['rl_winner'][m]['std']:.4f}"
-        print(f"{label:<22} | {m_str:<22} | {il_str:<22} | {rl_str:<22}")
-        
+        row_cols = [f"{label:<20}"]
+        for k in policy_keys:
+            val_str = f"{summary[k][m]['mean']:.4f} +/- {summary[k][m]['std']:.4f}"
+            row_cols.append(f"{val_str:<20}")
+        print(" | ".join(row_cols))
+
     print(divider + "\n")
-    
+
     # 7. Save Raw Results to File
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_path = os.path.join(root_dir, "final_evaluation_results.json")
     with open(output_path, "w") as f:
         json.dump(summary, f, indent=4)
-        
+
     logger.info(f"Saved aggregated evaluation results to {output_path}")
 
 
