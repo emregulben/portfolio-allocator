@@ -80,7 +80,7 @@ class MLPDenoiser(nn.Module):
         return self.net(x)
 
 class MeanCovMLPDenoiser(nn.Module):
-    def __init__(self, n_assets, action_dim, hidden_dim=256, t_dim=16, use_layernorm=False):
+    def __init__(self, n_assets, action_dim, hidden_dim=256, t_dim=16, use_layernorm=False, condition_on_prev_weights=False):
         """
         A control benchmark architecture that bypasses representation learning.
         It calculates the Mean and Covariance explicitly from the raw state tensor
@@ -88,6 +88,7 @@ class MeanCovMLPDenoiser(nn.Module):
         """
         super().__init__()
         self.t_dim = t_dim
+        self.condition_on_prev_weights = condition_on_prev_weights
         
         # 1. Calculate the dimensionality of the extracted features: n_assets (Means) + n_assets*n_assets (Covariances)
         extracted_features_dim = n_assets + (n_assets * n_assets)
@@ -100,6 +101,8 @@ class MeanCovMLPDenoiser(nn.Module):
         
         # 3. Calculate total input dimension for the MLP
         in_dim = extracted_features_dim + action_dim + t_dim
+        if condition_on_prev_weights:
+            in_dim += action_dim
         
         # 4. Construct the Neural Network layers
         layers: list[nn.Module] = [nn.Linear(in_dim, hidden_dim)]
@@ -149,7 +152,7 @@ class MeanCovMLPDenoiser(nn.Module):
         embeddings = t * embeddings
         return torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
 
-    def forward(self, state, action_noisy, t):
+    def forward(self, state, action_noisy, t, prev_weights=None):
         # 1. Intercept the raw state and extract Mean/Covariance features
         features = self._compute_mean_and_cov(state)
         
@@ -165,7 +168,12 @@ class MeanCovMLPDenoiser(nn.Module):
         t_embed = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         
         # 4. Combine and pass to the Neural Network
-        x = torch.cat((features, action_noisy, t_embed), dim=-1)
+        if self.condition_on_prev_weights:
+            if prev_weights is None:
+                raise ValueError("prev_weights must be provided when condition_on_prev_weights is True.")
+            x = torch.cat((features, action_noisy, t_embed, prev_weights), dim=-1)
+        else:
+            x = torch.cat((features, action_noisy, t_embed), dim=-1)
         return self.net(x)
 
 class TransformerDenoiser(nn.Module):
@@ -284,7 +292,7 @@ class PortDiff(nn.Module):
         self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
         self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
 
-    def forward(self, state, action_clean, weights=None):
+    def forward(self, state, action_clean, weights=None, prev_weights=None):
         """
         TRAINING ONLY: Calculates the loss by adding noise and asking the denoiser to guess it.
         Accepts optional AWR weights for Reinforcement Learning.
@@ -303,7 +311,10 @@ class PortDiff(nn.Module):
         action_noisy = sqrt_alphas_t * action_clean + sqrt_one_minus_alphas_t * noise
         
         # 4. Ask the MLPDenoiser to guess the noise we just added
-        predicted_noise = self.denoiser(state, action_noisy, t.unsqueeze(-1).float())
+        if prev_weights is not None:
+            predicted_noise = self.denoiser(state, action_noisy, t.unsqueeze(-1).float(), prev_weights=prev_weights)
+        else:
+            predicted_noise = self.denoiser(state, action_noisy, t.unsqueeze(-1).float())
         
         # 5. Calculate MSE without instantly averaging it (reduction='none')
         loss = F.mse_loss(predicted_noise, noise, reduction='none')
@@ -319,7 +330,7 @@ class PortDiff(nn.Module):
         return loss.mean()
     
     @torch.no_grad()
-    def sample(self, state: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
+    def sample(self, state: torch.Tensor, prev_weights: torch.Tensor | None = None, deterministic: bool = False) -> torch.Tensor:
         """
         INFERENCE ONLY (Real World): Denoises Gaussian noise into portfolio weights conditional on the market state.
 
@@ -330,6 +341,7 @@ class PortDiff(nn.Module):
 
         Args:
             state: Market state tensor of shape (batch_size, state_dim).
+            prev_weights: Incumbent portfolio weights of shape (batch_size, action_dim).
             deterministic: If True, uses deterministic sampling. If False, uses stochastic sampling.
 
         Returns:
@@ -359,7 +371,10 @@ class PortDiff(nn.Module):
         for t_step in reversed(range(self.num_timesteps)):
             t = torch.full((batch_size, 1), t_step, device=state.device, dtype=torch.float32)
 
-            predicted_noise = self.denoiser(state, action_t, t)
+            if prev_weights is not None:
+                predicted_noise = self.denoiser(state, action_t, t, prev_weights=prev_weights)
+            else:
+                predicted_noise = self.denoiser(state, action_t, t)
 
             alpha_t = 1.0 - self.betas[t_step]
             sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_step]

@@ -36,10 +36,19 @@ class PortDiffAWRTrainer:
         # We create the DataLoader here so it always uses the most up-to-date compiled buffer
         loader = DataLoader(self.replay_buffer, batch_size=self.batch_size, shuffle=True)
         
-        for state, action_noisy, advantage in loader:
-            state = state.to(self.device)
-            action_noisy = action_noisy.to(self.device)
-            advantage = advantage.to(self.device)
+        for batch in loader:
+            if len(batch) == 4:
+                state, prev_weights, action_noisy, advantage = batch
+                state = state.to(self.device)
+                prev_weights = prev_weights.to(self.device)
+                action_noisy = action_noisy.to(self.device)
+                advantage = advantage.to(self.device)
+            else:
+                state, action_noisy, advantage = batch
+                state = state.to(self.device)
+                prev_weights = None
+                action_noisy = action_noisy.to(self.device)
+                advantage = advantage.to(self.device)
             
             # 1. Calculate the AWR Weights mathematically: w = exp(Advantage / Beta)
             weights = torch.exp(advantage / self.beta)
@@ -51,7 +60,10 @@ class PortDiffAWRTrainer:
             self.optimizer.zero_grad()
             
             # 4. Forward pass: The model calculates MSE and multiplies it by our AWR weights!
-            loss = self.model(state, action_noisy, weights=weights)
+            if prev_weights is not None:
+                loss = self.model(state, action_noisy, weights=weights, prev_weights=prev_weights)
+            else:
+                loss = self.model(state, action_noisy, weights=weights)
             
             # 5. Backpropagation
             loss.backward()

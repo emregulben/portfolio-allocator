@@ -4,7 +4,7 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 
-from agents.dataset import PortfolioDataset
+from agents.dataset import PortfolioDataset, ConditionedPortfolioDataset
 from agents.trainer import PortDiffTrainer
 from agents.diffusion import map_to_feasible_portfolio, MLPDenoiser, MeanCovMLPDenoiser, PortDiff
 from torch.utils.data import TensorDataset
@@ -223,3 +223,116 @@ def test_mean_cov_forward_normalization():
     assert torch.allclose(feature_means, torch.zeros_like(feature_means), atol=1e-5), "Features are not centered at mean 0."
     # Relaxed tolerance to 1e-2 to account for 32-bit floating point precision limits when scaling microscopic decimals
     assert torch.allclose(feature_vars, torch.ones_like(feature_vars), atol=1e-2), "Features are not scaled to variance 1."
+
+def test_conditioned_denoiser_forward_and_sensitivity():
+    """
+    Verifies that MeanCovMLPDenoiser with condition_on_prev_weights=True:
+    1. Produces valid outputs of shape (batch_size, action_dim).
+    2. Actively conditions on prev_weights (different prev_weights yield different outputs).
+    3. Raises ValueError if prev_weights is missing.
+    """
+    batch_size, window_size, n_assets = 4, 60, 5
+    action_dim = n_assets + 1
+
+    model = MeanCovMLPDenoiser(
+        n_assets=n_assets,
+        action_dim=action_dim,
+        hidden_dim=64,
+        condition_on_prev_weights=True,
+    )
+    model.eval()
+
+    state = torch.randn(batch_size, window_size, n_assets) * 0.02
+    action_noisy = torch.randn(batch_size, action_dim)
+    t = torch.full((batch_size, 1), 50.0)
+
+    # Incumbent allocation A: 100% Cash
+    prev_weights_a = torch.zeros(batch_size, action_dim)
+    prev_weights_a[:, -1] = 1.0
+
+    # Incumbent allocation B: 20% in each of the 5 risky assets, 0% cash
+    prev_weights_b = torch.zeros(batch_size, action_dim)
+    prev_weights_b[:, :-1] = 0.20
+
+    out_a = model(state, action_noisy, t, prev_weights=prev_weights_a)
+    out_b = model(state, action_noisy, t, prev_weights=prev_weights_b)
+
+    assert out_a.shape == (batch_size, action_dim), "Output shape mismatch."
+    assert not torch.isnan(out_a).any(), "Conditioned forward pass produced NaNs."
+    assert not torch.allclose(out_a, out_b), (
+        "Denoiser must produce distinct outputs when incumbent portfolio weights differ."
+    )
+
+    # Missing prev_weights must raise ValueError
+    with pytest.raises(ValueError):
+        model(state, action_noisy, t, prev_weights=None)
+
+def test_conditioned_portfolio_dataset():
+    """
+    Verifies that ConditionedPortfolioDataset:
+    1. Returns a 3-tuple (state, prev_weights, label).
+    2. Sets Day 0 incumbent allocation to 100% Cash.
+    3. Sets Day i incumbent allocation to weights_df.iloc[i - 1].
+    """
+    np.random.seed(42)
+    n_days, n_assets = 80, 3
+    action_dim = n_assets + 1
+    window_size = 60
+
+    returns_df = pd.DataFrame(np.random.randn(n_days, n_assets))
+    raw_weights = np.random.rand(n_days - window_size, action_dim)
+    weights_df = pd.DataFrame(
+        raw_weights / raw_weights.sum(axis=1, keepdims=True),
+        index=range(window_size, n_days),
+    )
+
+    dataset = ConditionedPortfolioDataset(
+        returns_df,
+        weights_df,
+        window_size=window_size,
+        flatten=False,
+    )
+
+    assert len(dataset) == len(weights_df)
+
+    # Day 0: incumbent must be 100% Cash
+    state_0, prev_w_0, label_0 = dataset[0]
+    expected_cash = torch.zeros(action_dim)
+    expected_cash[-1] = 1.0
+    assert torch.allclose(prev_w_0, expected_cash), "Day 0 incumbent must be 100% Cash."
+    assert torch.allclose(label_0, torch.tensor(weights_df.iloc[0].to_numpy(), dtype=torch.float32))
+
+    # Day 1: incumbent must equal Day 0 label
+    _, prev_w_1, _ = dataset[1]
+    assert torch.allclose(prev_w_1, label_0), "Day 1 incumbent must equal Day 0 label."
+
+def test_conditioned_portdiff_sampling():
+    """
+    Verifies that PortDiff.sample with condition_on_prev_weights=True
+    satisfies budget and position limit feasibility constraints.
+    """
+    batch_size, window_size, n_assets = 2, 60, 4
+    action_dim = n_assets + 1
+
+    denoiser = MeanCovMLPDenoiser(
+        n_assets=n_assets,
+        action_dim=action_dim,
+        hidden_dim=32,
+        condition_on_prev_weights=True,
+    )
+    model = PortDiff(denoiser=denoiser, num_timesteps=5, beta_schedule="linear")
+    model.eval()
+
+    state = torch.randn(batch_size, window_size, n_assets) * 0.02
+    prev_weights = torch.zeros(batch_size, action_dim)
+    prev_weights[:, -1] = 1.0
+
+    weights = model.sample(state, prev_weights=prev_weights, deterministic=True)
+
+    # Budget constraint: sum to 1.0
+    for s in weights.sum(dim=-1).tolist():
+        assert s == pytest.approx(1.0, abs=1e-5)
+
+    # Position limit: risky weights <= 0.20
+    assert torch.all(weights[:, :-1] <= 0.20 + 1e-5)
+    assert torch.all(weights >= 0.0)

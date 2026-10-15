@@ -35,16 +35,28 @@ class PortDiffTrainer:
         self.model.train()
         total_loss = 0.0
         
-        for state, action_clean in self.train_loader:
-            # Move data to GPU / Apple Silicon
-            state = state.to(self.device)
-            action_clean = action_clean.to(self.device)
-            
-            # 1. Clear old gradients
-            self.optimizer.zero_grad()
-            
-            # 2. Forward pass (PortDiff automatically adds noise and calculates MSE loss)
-            loss = self.model(state, action_clean)
+        for batch in self.train_loader:
+            if len(batch) == 3:
+                state, prev_weights, action_clean = batch
+                state = state.to(self.device)
+                prev_weights = prev_weights.to(self.device)
+                action_clean = action_clean.to(self.device)
+                
+                # 1. Clear old gradients
+                self.optimizer.zero_grad()
+                
+                # 2. Forward pass (PortDiff automatically adds noise and calculates MSE loss)
+                loss = self.model(state, action_clean, prev_weights=prev_weights)
+            else:
+                state, action_clean = batch
+                state = state.to(self.device)
+                action_clean = action_clean.to(self.device)
+                
+                # 1. Clear old gradients
+                self.optimizer.zero_grad()
+                
+                # 2. Forward pass (PortDiff automatically adds noise and calculates MSE loss)
+                loss = self.model(state, action_clean)
             
             # 3. Backpropagation (calculate errors)
             loss.backward()
@@ -71,17 +83,32 @@ class PortDiffTrainer:
         total_mse_loss = 0.0
         total_mae_loss = 0.0
         
-        for state, action_clean in self.val_loader:
-            state = state.to(self.device)
-            action_clean = action_clean.to(self.device)
-            
-            # 1. Standard Diffusion Noise Loss
-            loss = self.model(state, action_clean)
+        for batch in self.val_loader:
+            if len(batch) == 3:
+                state, prev_weights, action_clean = batch
+                state = state.to(self.device)
+                prev_weights = prev_weights.to(self.device)
+                action_clean = action_clean.to(self.device)
+                
+                # 1. Standard Diffusion Noise Loss
+                loss = self.model(state, action_clean, prev_weights=prev_weights)
+                
+                # 2. Direct Action-Space MAE (Imitation Quality)
+                # Sample actual weights from pure noise to see how well we clone the expert
+                sampled_actions = self.model.sample(state, prev_weights=prev_weights)
+            else:
+                state, action_clean = batch
+                state = state.to(self.device)
+                action_clean = action_clean.to(self.device)
+                
+                # 1. Standard Diffusion Noise Loss
+                loss = self.model(state, action_clean)
+                
+                # 2. Direct Action-Space MAE (Imitation Quality)
+                # Sample actual weights from pure noise to see how well we clone the expert
+                sampled_actions = self.model.sample(state)
+                
             total_mse_loss += loss.item()
-            
-            # 2. Direct Action-Space MAE (Imitation Quality)
-            # Sample actual weights from pure noise to see how well we clone the expert
-            sampled_actions = self.model.sample(state)
             mae = torch.nn.functional.l1_loss(sampled_actions, action_clean)
             total_mae_loss += mae.item()
             
