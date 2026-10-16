@@ -174,7 +174,7 @@ def load_evaluation_environment():
     return config, hmm, sim_model, expert, il_uncond, rl_uncond, il_cond, rl_cond, device
 
 
-def rollout_conditioned_batch(model, batch_states, batch_returns, device, deterministic=True):
+def rollout_conditioned_batch(model, batch_states, batch_returns, device, sampler: str = "ddim"):
     """
     Executes closed-loop autoregressive rollout in parallel across independent market seeds.
     Tracks intra-period portfolio price drift prior to each rebalancing step.
@@ -184,7 +184,7 @@ def rollout_conditioned_batch(model, batch_states, batch_returns, device, determ
         batch_states (torch.Tensor): Market return window tensor of shape (B, T, window, n_assets).
         batch_returns (torch.Tensor): Realized returns of shape (B, T, action_dim).
         device (torch.device): Computation device.
-        deterministic (bool): Whether to use deterministic DDIM sampling (sigma_t = 0).
+        sampler (str): Reverse sampling strategy ("ddim", "ddpm_det", "ddpm_stoch"). Defaults to "ddim".
 
     Returns:
         np.ndarray: Portfolio weights array of shape (B, T, action_dim).
@@ -204,7 +204,7 @@ def rollout_conditioned_batch(model, batch_states, batch_returns, device, determ
         pw_t = prev_w.clone()        # (B, action_dim)
 
         with torch.no_grad():
-            w_t = model.sample(st_t, prev_weights=pw_t, deterministic=deterministic)
+            w_t = model.sample(st_t, prev_weights=pw_t, sampler=sampler)
             all_weights.append(w_t)
 
             # Intra-period price drift to the end of period t
@@ -293,19 +293,19 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     for i in range(num_seeds):
         states_i = batch_states[i]
         with torch.no_grad():
-            w_il_det = il_uncond.sample(states_i, deterministic=True).cpu().numpy()
-            w_rl_det = rl_uncond.sample(states_i, deterministic=True).cpu().numpy()
+            w_il_det = il_uncond.sample(states_i, sampler="ddim").cpu().numpy()
+            w_rl_det = rl_uncond.sample(states_i, sampler="ddim").cpu().numpy()
         results["il_unconditioned_det"].append(compute_portfolio_metrics(w_il_det, all_actual_returns[i], cost_c=cost_c))
         results["rl_unconditioned_det"].append(compute_portfolio_metrics(w_rl_det, all_actual_returns[i], cost_c=cost_c))
 
     # 3. Conditioned Policies (Closed-Loop Autoregressive Rollout)
     logger.info("Evaluating Conditioned IL Policy (Closed-Loop Autoregressive)...")
-    il_cond_weights = rollout_conditioned_batch(il_cond, batch_states, batch_returns, device, deterministic=True)
+    il_cond_weights = rollout_conditioned_batch(il_cond, batch_states, batch_returns, device, sampler="ddim")
     for i in range(num_seeds):
         results["il_conditioned_det"].append(compute_portfolio_metrics(il_cond_weights[i], all_actual_returns[i], cost_c=cost_c))
 
     logger.info("Evaluating Conditioned RL Policy (Closed-Loop Autoregressive)...")
-    rl_cond_weights = rollout_conditioned_batch(rl_cond, batch_states, batch_returns, device, deterministic=True)
+    rl_cond_weights = rollout_conditioned_batch(rl_cond, batch_states, batch_returns, device, sampler="ddim")
     for i in range(num_seeds):
         results["rl_conditioned_det"].append(compute_portfolio_metrics(rl_cond_weights[i], all_actual_returns[i], cost_c=cost_c))
 

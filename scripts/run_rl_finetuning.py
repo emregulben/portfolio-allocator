@@ -407,7 +407,7 @@ def run_rl_conditioned():
                 
                 with torch.no_grad():
                     # Deterministic clean policy baseline
-                    clean_act_t = model.sample(st_t, prev_weights=pw_t, deterministic=True)
+                    clean_act_t = model.sample(st_t, prev_weights=pw_t, sampler="ddim")
                     all_clean_actions.append(clean_act_t)
                     
                     # Inject exploration noise and map to feasible simplex

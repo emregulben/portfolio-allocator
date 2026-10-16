@@ -30,23 +30,24 @@ def test_environment():
 
 
 def test_deterministic_reproducibility(test_environment):
-    """Verifies that deterministic DDIM sampling yields identical outputs for identical states."""
+    """Verifies that deterministic samplers (DDIM and DDPM-Det) yield identical outputs for identical states."""
     model, state = test_environment
 
-    weights_first = model.sample(state, deterministic=True)
-    weights_second = model.sample(state, deterministic=True)
+    for sampler_name in ["ddim", "ddpm_det"]:
+        weights_first = model.sample(state, sampler=sampler_name)
+        weights_second = model.sample(state, sampler=sampler_name)
 
-    assert torch.equal(weights_first, weights_second), (
-        "Deterministic sampling must return identical weights on repeated evaluations."
-    )
+        assert torch.equal(weights_first, weights_second), (
+            f"Deterministic sampler '{sampler_name}' must return identical weights on repeated evaluations."
+        )
 
 
 def test_stochastic_variance(test_environment):
     """Verifies that stochastic DDPM sampling exhibits dispersion across repeated evaluations."""
     model, state = test_environment
 
-    weights_first = model.sample(state, deterministic=False)
-    weights_second = model.sample(state, deterministic=False)
+    weights_first = model.sample(state, sampler="ddpm_stoch")
+    weights_second = model.sample(state, sampler="ddpm_stoch")
 
     assert not torch.allclose(weights_first, weights_second), (
         "Stochastic sampling must produce non-identical weights due to reverse step noise."
@@ -54,11 +55,11 @@ def test_stochastic_variance(test_environment):
 
 
 def test_feasibility_constraints(test_environment):
-    """Verifies that both sampling modes satisfy budget and single-asset allocation limits."""
+    """Verifies that all sampling modes satisfy budget and single-asset allocation limits."""
     model, state = test_environment
 
-    for deterministic in [True, False]:
-        weights = model.sample(state, deterministic=deterministic)
+    for sampler_name in ["ddim", "ddpm_det", "ddpm_stoch"]:
+        weights = model.sample(state, sampler=sampler_name)
 
         # Budget constraint: weights must sum to 1.0
         row_sums = weights.sum(dim=-1).tolist()
@@ -73,3 +74,27 @@ def test_feasibility_constraints(test_environment):
         assert torch.all(risky_weights <= 0.20 + 1e-5), (
             "Risky asset weights must not exceed the 20% cap."
         )
+
+
+def test_ddim_ddpm_det_numerical_closeness(test_environment):
+    """
+    Verifies that Song et al. DDIM and zero-noise DDPM samplers yield consistent allocations.
+    Both discretize the same probability flow trajectory in the zero-noise limit.
+    """
+    model, state = test_environment
+
+    weights_ddim = model.sample(state, sampler="ddim")
+    weights_ddpm_det = model.sample(state, sampler="ddpm_det")
+
+    max_diff = torch.max(torch.abs(weights_ddim - weights_ddpm_det)).item()
+    assert max_diff < 0.05, (
+        f"DDIM and DDPM-Det allocations deviate by {max_diff:.4f}, expected close trajectory alignment."
+    )
+
+
+def test_invalid_sampler_raises(test_environment):
+    """Verifies that unsupported sampler strings raise a ValueError."""
+    model, state = test_environment
+
+    with pytest.raises(ValueError, match="Unknown sampler"):
+        model.sample(state, sampler="unsupported_sampler")

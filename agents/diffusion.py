@@ -330,28 +330,38 @@ class PortDiff(nn.Module):
         return loss.mean()
     
     @torch.no_grad()
-    def sample(self, state: torch.Tensor, prev_weights: torch.Tensor | None = None, deterministic: bool = False) -> torch.Tensor:
+    def sample(
+        self,
+        state: torch.Tensor,
+        prev_weights: torch.Tensor | None = None,
+        sampler: str = "ddim",
+    ) -> torch.Tensor:
         """
         INFERENCE ONLY (Real World): Denoises Gaussian noise into portfolio weights conditional on the market state.
 
-        Supports two reverse sampling modes:
-        - Stochastic (DDPM): Injects noise at each reverse step (sigma_t > 0).
-        - Deterministic (DDIM): Sets reverse noise to zero (sigma_t = 0) with a fixed 
-          initial latent, ensuring identical states yield identical portfolio weights.
+        Supports three reverse sampling schemes:
+        - "ddim" (Song et al., 2020): Deterministic implicit model reverse step with sigma_t = 0.
+        - "ddpm_det": Deterministic DDPM mean step (Ho et al., 2020 with sigma_t = 0).
+        - "ddpm_stoch": Standard stochastic DDPM with Langevin noise injection (sigma_t > 0).
 
         Args:
             state: Market state tensor of shape (batch_size, state_dim).
             prev_weights: Incumbent portfolio weights of shape (batch_size, action_dim).
-            deterministic: If True, uses deterministic sampling. If False, uses stochastic sampling.
+            sampler: Sampling strategy ("ddim", "ddpm_det", or "ddpm_stoch"). Defaults to "ddim".
 
         Returns:
             Feasible portfolio weight tensor of shape (batch_size, action_dim).
         """
+        if sampler not in ("ddim", "ddpm_det", "ddpm_stoch"):
+            raise ValueError(
+                f"Unknown sampler: '{sampler}'. Supported options are 'ddim', 'ddpm_det', 'ddpm_stoch'."
+            )
+
         batch_size = state.shape[0]
         action_dim = self.denoiser.net[-1].out_features
 
         # Initialize latent state at t = T
-        if deterministic:
+        if sampler in ("ddim", "ddpm_det"):
             generator = torch.Generator(device=state.device)
             generator.manual_seed(42)
             action_t = torch.randn(
@@ -376,19 +386,35 @@ class PortDiff(nn.Module):
             else:
                 predicted_noise = self.denoiser(state, action_t, t)
 
-            alpha_t = 1.0 - self.betas[t_step]
-            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_step]
+            if sampler == "ddim":
+                # Song et al. (2020) deterministic DDIM reverse step
+                pred_x0 = (
+                    action_t - self.sqrt_one_minus_alphas_cumprod[t_step] * predicted_noise
+                ) / self.sqrt_alphas_cumprod[t_step]
 
-            # Mean reverse step
-            action_t = (
-                action_t - (1.0 - alpha_t) / sqrt_one_minus_alpha_cumprod_t * predicted_noise
-            ) / torch.sqrt(alpha_t)
+                if t_step > 0:
+                    alpha_cumprod_prev = self.alphas_cumprod[t_step - 1]
+                    action_t = (
+                        torch.sqrt(alpha_cumprod_prev) * pred_x0
+                        + torch.sqrt(1.0 - alpha_cumprod_prev) * predicted_noise
+                    )
+                else:
+                    action_t = pred_x0
+            else:
+                # Ho et al. (2020) DDPM formulation
+                alpha_t = 1.0 - self.betas[t_step]
+                sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_step]
 
-            # Stochastic perturbation (omitted in deterministic mode)
-            if not deterministic and t_step > 0:
-                noise = torch.randn_like(action_t)
-                sigma_t = torch.sqrt(self.betas[t_step])
-                action_t = action_t + sigma_t * noise
+                # Mean reverse step
+                action_t = (
+                    action_t - (1.0 - alpha_t) / sqrt_one_minus_alpha_cumprod_t * predicted_noise
+                ) / torch.sqrt(alpha_t)
+
+                # Stochastic perturbation (omitted in deterministic mode)
+                if sampler == "ddpm_stoch" and t_step > 0:
+                    noise = torch.randn_like(action_t)
+                    sigma_t = torch.sqrt(self.betas[t_step])
+                    action_t = action_t + sigma_t * noise
 
         # Custom Feasibility Mapping: Enforce Markowitz constraints
         final_weights = map_to_feasible_portfolio(action_t, max_weight=0.20)

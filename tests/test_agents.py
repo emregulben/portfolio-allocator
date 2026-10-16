@@ -327,7 +327,7 @@ def test_conditioned_portdiff_sampling():
     prev_weights = torch.zeros(batch_size, action_dim)
     prev_weights[:, -1] = 1.0
 
-    weights = model.sample(state, prev_weights=prev_weights, deterministic=True)
+    weights = model.sample(state, prev_weights=prev_weights, sampler="ddim")
 
     # Budget constraint: sum to 1.0
     for s in weights.sum(dim=-1).tolist():

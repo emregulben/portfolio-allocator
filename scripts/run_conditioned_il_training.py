@@ -138,7 +138,7 @@ def train_conditioned_il():
             prev_weights = prev_weights.to(trainer.device)
             action_clean = action_clean.to(trainer.device)
 
-            sampled_actions = trained_model.sample(state, prev_weights=prev_weights, deterministic=True)
+            sampled_actions = trained_model.sample(state, prev_weights=prev_weights, sampler="ddim")
             mae = torch.nn.functional.l1_loss(sampled_actions, action_clean)
             seed_maes.append(mae.item())
 
