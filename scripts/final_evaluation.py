@@ -7,6 +7,7 @@ import json
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from scipy import stats
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -90,17 +91,53 @@ def compute_portfolio_metrics(weights_arr, returns_arr, cost_c=0.0005):
         "net_sharpe": float(net_sharpe),
         "net_sortino": float(net_sortino),
         "max_drawdown": float(max_drawdown),
-        "mean_turnover": float(mean_turnover)
+        "mean_turnover": float(mean_turnover),
+    }
+
+
+def compute_paired_stats(metric_a, metric_b):
+    """
+    Computes paired difference statistics, 95% confidence intervals, and p-values
+    across matched market seeds.
+
+    Args:
+        metric_a (list[float]): Metric values for model A (e.g., RL Cond).
+        metric_b (list[float]): Metric values for model B (e.g., IL Cond).
+
+    Returns:
+        dict: Mean difference, standard error, 95% CI bounds, t-statistic, and p-value.
+    """
+    diffs = np.array(metric_a) - np.array(metric_b)
+    n = len(diffs)
+    mean_diff = float(np.mean(diffs))
+    std_diff = float(np.std(diffs, ddof=1))
+    se_diff = std_diff / np.sqrt(n)
+
+    # Two-sided critical t value for 95% confidence interval
+    t_crit = float(stats.t.ppf(0.975, df=n - 1))
+    ci_lower = mean_diff - t_crit * se_diff
+    ci_upper = mean_diff + t_crit * se_diff
+
+    # Paired two-sided t-test
+    t_stat = mean_diff / se_diff if se_diff > 1e-12 else 0.0
+    p_val = float(2.0 * (1.0 - stats.t.cdf(np.abs(t_stat), df=n - 1)))
+
+    return {
+        "mean_diff": mean_diff,
+        "se_diff": se_diff,
+        "ci_95": (ci_lower, ci_upper),
+        "t_stat": t_stat,
+        "p_value": p_val,
     }
 
 
 def load_evaluation_environment():
     """
-    Initializes market data, HMM simulator, classical expert, and both unconditioned
-    and conditioned neural policies.
+    Initializes market data, HMM simulator, classical and cost-aware experts,
+    and both unconditioned and conditioned neural policies.
 
     Returns:
-        tuple: (config, hmm, sim_model, expert, il_uncond, rl_uncond, il_cond, rl_cond, device)
+        tuple: (config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device)
     """
     logger = setup_logger("Final_Evaluation")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,12 +168,21 @@ def load_evaluation_environment():
     sim_model = SingleIndexModel(tickers=stock_tickers, emission_dist="gaussian")
     sim_model.fit(pd.DataFrame(data[stock_tickers]), data[market_ticker])
 
-    # 2. Classical Markowitz Benchmark Setup
+    # 2. Classical Markowitz and Transaction-Cost-Aware Markowitz Experts
+    cost_c = config["expert"]["transaction_cost"]
     expert = MarkowitzExpert(
         risk_aversion=config["expert"]["risk_aversion"],
         rolling_window=config["expert"]["rolling_window"],
         max_weight=config["expert"]["max_weight"],
-        annual_risk_free_rate=config["expert"]["annual_risk_free_rate"]
+        annual_risk_free_rate=config["expert"]["annual_risk_free_rate"],
+        transaction_cost=0.0,
+    )
+    expert_tc = MarkowitzExpert(
+        risk_aversion=config["expert"]["risk_aversion"],
+        rolling_window=config["expert"]["rolling_window"],
+        max_weight=config["expert"]["max_weight"],
+        annual_risk_free_rate=config["expert"]["annual_risk_free_rate"],
+        transaction_cost=cost_c,
     )
 
     action_dim = len(stock_tickers) + 1
@@ -171,7 +217,7 @@ def load_evaluation_environment():
     rl_cond.to(device).eval()
     logger.info(f"Loaded conditioned RL model from {rl_cond_path}")
 
-    return config, hmm, sim_model, expert, il_uncond, rl_uncond, il_cond, rl_cond, device
+    return config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device
 
 
 def rollout_conditioned_batch(model, batch_states, batch_returns, device, sampler: str = "ddim"):
@@ -220,13 +266,14 @@ def rollout_conditioned_batch(model, batch_states, batch_returns, device, sample
 def run_final_evaluation(num_seeds=30, start_seed=9000):
     """
     Executes an out-of-sample statistical comparison across 30 unseen market seeds
-    evaluating Markowitz, Unconditioned IL/RL, and Conditioned IL/RL policies.
+    evaluating Classical Markowitz, Cost-Aware Markowitz, Unconditioned IL/RL,
+    and Conditioned IL/RL policies with paired confidence intervals.
 
     Args:
         num_seeds (int): Number of independent market seeds to evaluate.
         start_seed (int): Base random seed ensuring unseen evaluation paths.
     """
-    config, hmm, sim_model, expert, il_uncond, rl_uncond, il_cond, rl_cond, device = load_evaluation_environment()
+    config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device = load_evaluation_environment()
     logger = setup_logger("Final_Evaluation")
 
     cost_c = config["expert"]["transaction_cost"]
@@ -235,6 +282,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
 
     policy_keys = [
         "markowitz",
+        "markowitz_tc",
         "il_unconditioned_det",
         "rl_unconditioned_det",
         "il_conditioned_det",
@@ -242,6 +290,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     ]
     policy_headers = {
         "markowitz": "Markowitz",
+        "markowitz_tc": "Markowitz (TC)",
         "il_unconditioned_det": "IL Uncond (Det)",
         "rl_unconditioned_det": "RL Uncond (Det)",
         "il_conditioned_det": "IL Cond (Det)",
@@ -249,6 +298,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     }
 
     results = {k: [] for k in policy_keys}
+    results["il_cond_ddpm_det"] = []
 
     logger.info(f"Simulating {num_seeds} unseen market paths (seeds {start_seed} to {start_seed + num_seeds - 1})...")
 
@@ -281,12 +331,16 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     batch_states = torch.tensor(np.array(all_states), dtype=torch.float32).to(device)
     batch_returns = torch.tensor(np.array(all_actual_returns), dtype=torch.float32).to(device)
 
-    # 1. Classical Markowitz Benchmark
-    logger.info("Evaluating Classical Markowitz Expert...")
-    for i in range(num_seeds):
-        markowitz_df = expert.generate_labels(all_sim_stocks[i])
+    # 1. Classical Markowitz and Cost-Aware Markowitz Benchmarks
+    logger.info("Evaluating Classical and Cost-Aware Markowitz Experts...")
+    for i in tqdm(range(num_seeds), desc="Markowitz Optimization"):
+        markowitz_df = expert.generate_labels(all_sim_stocks[i], cost_aware=False)
         w_markowitz = markowitz_df.to_numpy()
         results["markowitz"].append(compute_portfolio_metrics(w_markowitz, all_actual_returns[i], cost_c=cost_c))
+
+        markowitz_tc_df = expert_tc.generate_labels(all_sim_stocks[i], cost_aware=True)
+        w_markowitz_tc = markowitz_tc_df.to_numpy()
+        results["markowitz_tc"].append(compute_portfolio_metrics(w_markowitz_tc, all_actual_returns[i], cost_c=cost_c))
 
     # 2. Unconditioned Policies (Deterministic DDIM)
     logger.info("Evaluating Unconditioned IL and RL Policies...")
@@ -298,18 +352,24 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         results["il_unconditioned_det"].append(compute_portfolio_metrics(w_il_det, all_actual_returns[i], cost_c=cost_c))
         results["rl_unconditioned_det"].append(compute_portfolio_metrics(w_rl_det, all_actual_returns[i], cost_c=cost_c))
 
-    # 3. Conditioned Policies (Closed-Loop Autoregressive Rollout)
-    logger.info("Evaluating Conditioned IL Policy (Closed-Loop Autoregressive)...")
+    # 3. Conditioned Policies (Closed-Loop Autoregressive Rollout via DDIM)
+    logger.info("Evaluating Conditioned IL Policy (Closed-Loop Autoregressive, DDIM)...")
     il_cond_weights = rollout_conditioned_batch(il_cond, batch_states, batch_returns, device, sampler="ddim")
     for i in range(num_seeds):
         results["il_conditioned_det"].append(compute_portfolio_metrics(il_cond_weights[i], all_actual_returns[i], cost_c=cost_c))
 
-    logger.info("Evaluating Conditioned RL Policy (Closed-Loop Autoregressive)...")
+    logger.info("Evaluating Conditioned RL Policy (Closed-Loop Autoregressive, DDIM)...")
     rl_cond_weights = rollout_conditioned_batch(rl_cond, batch_states, batch_returns, device, sampler="ddim")
     for i in range(num_seeds):
         results["rl_conditioned_det"].append(compute_portfolio_metrics(rl_cond_weights[i], all_actual_returns[i], cost_c=cost_c))
 
-    # 4. Statistical Aggregation (Mean +/- Std)
+    # 4. Sampler Robustness Check (Conditioned IL under zero-noise DDPM-Det)
+    logger.info("Evaluating Conditioned IL Policy under DDPM-Det Sampler (Robustness Check)...")
+    il_cond_ddpm_weights = rollout_conditioned_batch(il_cond, batch_states, batch_returns, device, sampler="ddpm_det")
+    for i in range(num_seeds):
+        results["il_cond_ddpm_det"].append(compute_portfolio_metrics(il_cond_ddpm_weights[i], all_actual_returns[i], cost_c=cost_c))
+
+    # 5. Statistical Aggregation (Mean +/- Std)
     metrics_list = ["net_sharpe", "gross_sharpe", "net_sortino", "net_return", "max_drawdown", "mean_turnover"]
     metric_labels = {
         "net_sharpe": "Net Sharpe Ratio",
@@ -320,8 +380,9 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         "mean_turnover": "Daily Turnover"
     }
 
+    all_keys = policy_keys + ["il_cond_ddpm_det"]
     summary = {}
-    for model_key in policy_keys:
+    for model_key in all_keys:
         summary[model_key] = {}
         for m in metrics_list:
             vals = [r[m] for r in results[model_key]]
@@ -330,7 +391,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
                 "std": float(np.std(vals))
             }
 
-    # 5. Formatted Results Table Display
+    # 6. Formatted Results Table Display
     header_cols = [f"{'Metric':<20}"] + [f"{policy_headers[k]:<20}" for k in policy_keys]
     header = " | ".join(header_cols)
     divider = "-" * len(header)
@@ -351,13 +412,77 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
 
     print(divider + "\n")
 
-    # 6. Save Raw Results to File
+    # 7. Sampler Robustness Check Table (DDIM vs. DDPM-Det)
+    rob_header = f"{'Metric':<20} | {'IL Cond (DDIM)':<20} | {'IL Cond (DDPM-Det)':<20} | {'Abs Diff (|Delta|)':<20}"
+    rob_div = "-" * len(rob_header)
+    print("\n" + rob_div)
+    print("SAMPLER ROBUSTNESS CHECK: SONG ET AL. DDIM VS. HO ET AL. ZERO-NOISE DDPM-DET")
+    print(rob_div)
+    print(rob_header)
+    print(rob_div)
+    for m in metrics_list:
+        val_ddim = summary["il_conditioned_det"][m]["mean"]
+        val_ddpm = summary["il_cond_ddpm_det"][m]["mean"]
+        diff = abs(val_ddim - val_ddpm)
+        print(f"{metric_labels[m]:<20} | {val_ddim:<20.4f} | {val_ddpm:<20.4f} | {diff:<20.4f}")
+    print(rob_div + "\n")
+
+    # 8. Paired Differences & 95% Confidence Intervals
+    comparisons = [
+        ("RL Cond vs IL Cond", "rl_conditioned_det", "il_conditioned_det"),
+        ("IL Cond vs Markowitz TC", "il_conditioned_det", "markowitz_tc"),
+        ("IL Cond vs Markowitz", "il_conditioned_det", "markowitz"),
+    ]
+
+    paired_summary = {}
+    print("=" * 95)
+    print("PAIRED STATISTICAL DIFFERENCES & 95% CONFIDENCE INTERVALS (30 UNSEEN SEEDS)")
+    print("=" * 95)
+
+    for comp_name, key_a, key_b in comparisons:
+        paired_summary[comp_name] = {}
+        print(f"\n--- Comparison: {comp_name} [Model A: {key_a} - Model B: {key_b}] ---")
+        comp_hdr = f"{'Metric':<20} | {'Mean Diff':<12} | {'95% Conf Interval':<24} | {'t-stat':<10} | {'p-value':<10}"
+        print(comp_hdr)
+        print("-" * len(comp_hdr))
+
+        for m in metrics_list:
+            vals_a = [r[m] for r in results[key_a]]
+            vals_b = [r[m] for r in results[key_b]]
+            p_stats = compute_paired_stats(vals_a, vals_b)
+            paired_summary[comp_name][m] = p_stats
+
+            ci_str = f"[{p_stats['ci_95'][0]:+.4f}, {p_stats['ci_95'][1]:+.4f}]"
+            sig_marker = "***" if p_stats['p_value'] < 0.001 else ("**" if p_stats['p_value'] < 0.01 else ("*" if p_stats['p_value'] < 0.05 else "n.s."))
+            print(f"{metric_labels[m]:<20} | {p_stats['mean_diff']:<+12.4f} | {ci_str:<24} | {p_stats['t_stat']:<10.3f} | {p_stats['p_value']:<7.4f} {sig_marker}")
+
+    print("=" * 95 + "\n")
+
+    # 9. Save Raw and Paired Results to File
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_path = os.path.join(root_dir, "final_evaluation_results.json")
-    with open(output_path, "w") as f:
-        json.dump(summary, f, indent=4)
+    save_data = {
+        "summary": summary,
+        "paired_statistics": {
+            comp_name: {
+                m: {
+                    "mean_diff": paired_summary[comp_name][m]["mean_diff"],
+                    "se_diff": paired_summary[comp_name][m]["se_diff"],
+                    "ci_95_lower": paired_summary[comp_name][m]["ci_95"][0],
+                    "ci_95_upper": paired_summary[comp_name][m]["ci_95"][1],
+                    "t_stat": paired_summary[comp_name][m]["t_stat"],
+                    "p_value": paired_summary[comp_name][m]["p_value"],
+                }
+                for m in metrics_list
+            }
+            for comp_name, _, _ in comparisons
+        }
+    }
 
-    logger.info(f"Saved aggregated evaluation results to {output_path}")
+    with open(output_path, "w") as f:
+        json.dump(save_data, f, indent=4)
+
+    logger.info(f"Saved aggregated evaluation results and paired statistics to {output_path}")
 
 
 if __name__ == "__main__":
