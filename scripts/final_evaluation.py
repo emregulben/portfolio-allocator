@@ -430,6 +430,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     # 8. Paired Differences & 95% Confidence Intervals
     comparisons = [
         ("RL Cond vs IL Cond", "rl_conditioned_det", "il_conditioned_det"),
+        ("RL Cond vs Markowitz TC", "rl_conditioned_det", "markowitz_tc"),
         ("IL Cond vs Markowitz TC", "il_conditioned_det", "markowitz_tc"),
         ("IL Cond vs Markowitz", "il_conditioned_det", "markowitz"),
     ]
