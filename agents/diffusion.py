@@ -3,6 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+
+def fixed_initial_latents(num_rows: int, action_dim: int, device: torch.device) -> torch.Tensor:
+    """
+    Fixed starting noise used by the deterministic samplers (seed 42).
+
+    Row k is always the same for a given num_rows, so callers can hand the same
+    starting noise to the same market path across separate sample() calls.
+
+    Args:
+        num_rows: Number of latent rows (one per batch element).
+        action_dim: Size of each latent (number of assets incl. cash).
+        device: Device to create the tensor on.
+
+    Returns:
+        Tensor of shape (num_rows, action_dim).
+    """
+    generator = torch.Generator(device=device)
+    generator.manual_seed(42)
+    return torch.randn(
+        (num_rows, action_dim),
+        generator=generator,
+        device=device,
+        dtype=torch.float32,
+    )
+
+
 def map_to_feasible_portfolio(action_t: torch.Tensor, max_weight: float = 0.20) -> torch.Tensor:
     """Enforces Markowitz constraints by safely parking illegal excess into Cash."""
     w = torch.clamp(action_t, min=0.0)
@@ -335,6 +361,7 @@ class PortDiff(nn.Module):
         state: torch.Tensor,
         prev_weights: torch.Tensor | None = None,
         sampler: str = "ddim",
+        initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         INFERENCE ONLY (Real World): Denoises Gaussian noise into portfolio weights conditional on the market state.
@@ -348,6 +375,9 @@ class PortDiff(nn.Module):
             state: Market state tensor of shape (batch_size, state_dim).
             prev_weights: Incumbent portfolio weights of shape (batch_size, action_dim).
             sampler: Sampling strategy ("ddim", "ddpm_det", or "ddpm_stoch"). Defaults to "ddim".
+            initial_noise: Optional starting latent of shape (batch_size, action_dim). If None,
+                deterministic samplers use fixed_initial_latents (seed 42, row k for batch row k)
+                and "ddpm_stoch" draws fresh noise.
 
         Returns:
             Feasible portfolio weight tensor of shape (batch_size, action_dim).
@@ -361,15 +391,14 @@ class PortDiff(nn.Module):
         action_dim = self.denoiser.net[-1].out_features
 
         # Initialize latent state at t = T
-        if sampler in ("ddim", "ddpm_det"):
-            generator = torch.Generator(device=state.device)
-            generator.manual_seed(42)
-            action_t = torch.randn(
-                (batch_size, action_dim),
-                generator=generator,
-                device=state.device,
-                dtype=torch.float32,
-            )
+        if initial_noise is not None:
+            if tuple(initial_noise.shape) != (batch_size, action_dim):
+                raise ValueError(
+                    f"initial_noise must have shape {(batch_size, action_dim)}, got {tuple(initial_noise.shape)}."
+                )
+            action_t = initial_noise.to(device=state.device, dtype=torch.float32)
+        elif sampler in ("ddim", "ddpm_det"):
+            action_t = fixed_initial_latents(batch_size, action_dim, state.device)
         else:
             action_t = torch.randn(
                 (batch_size, action_dim),

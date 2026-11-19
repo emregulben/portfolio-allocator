@@ -15,7 +15,7 @@ from simulator.loader import MarketDataLoader
 from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
 from experts.markowitz import MarkowitzExpert
-from agents.diffusion import MeanCovMLPDenoiser, PortDiff, map_to_feasible_portfolio
+from agents.diffusion import MeanCovMLPDenoiser, PortDiff, map_to_feasible_portfolio, fixed_initial_latents
 
 
 def setup_logger(name):
@@ -43,6 +43,20 @@ def compute_portfolio_metrics(weights_arr, returns_arr, cost_c=0.0005):
         dict: Dictionary containing gross/net returns, Sharpe, Sortino, MDD, and turnover.
     """
     T = len(weights_arr)
+
+    # 0. Guard: refuse invalid portfolios (e.g. zeros or NaN from a failed GPU step)
+    #    instead of silently turning them into metrics.
+    weights_arr = np.asarray(weights_arr, dtype=float)
+    row_sums = weights_arr.sum(axis=1)
+    if (not np.all(np.isfinite(weights_arr))
+            or np.any(weights_arr < -1e-6)
+            or np.any(np.abs(row_sums - 1.0) > 1e-4)):
+        bad_days = np.where(~np.isfinite(row_sums) | (np.abs(row_sums - 1.0) > 1e-4)
+                            | np.any(weights_arr < -1e-6, axis=1))[0]
+        raise ValueError(
+            f"Invalid portfolio weights on {len(bad_days)} of {T} days (first: day {bad_days[0]}): "
+            "weights must be finite, non-negative and sum to 1."
+        )
 
     # 1. Daily Gross Returns: w_t^T r_{t+1}
     gross_returns = np.sum(weights_arr * returns_arr, axis=1)
@@ -131,10 +145,13 @@ def compute_paired_stats(metric_a, metric_b):
     }
 
 
-def load_evaluation_environment():
+def load_evaluation_environment(device_name: str = "cpu"):
     """
     Initializes market data, HMM simulator, classical and cost-aware experts,
     and both unconditioned and conditioned neural policies.
+
+    Args:
+        device_name (str): "cpu" (default; reproducible) or "mps" (Apple GPU).
 
     Returns:
         tuple: (config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device)
@@ -145,7 +162,7 @@ def load_evaluation_environment():
     with open(os.path.join(root_dir, "config.yaml"), "r") as f:
         config = yaml.safe_load(f)
 
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(device_name)
     logger.info(f"Evaluation running on device: {device}")
 
     # 1. Market Data & HMM Simulator Setup
@@ -155,7 +172,8 @@ def load_evaluation_environment():
     loader = MarketDataLoader(
         tickers=[market_ticker] + stock_tickers,
         start_date=config["data"]["start_date"],
-        end_date=config["data"]["end_date"]
+        end_date=config["data"]["end_date"],
+        cache_path=os.path.join(root_dir, config["data"]["snapshot_path"]),
     )
     data = loader.fetch_data()
 
@@ -220,6 +238,31 @@ def load_evaluation_environment():
     return config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device
 
 
+def sample_unconditioned_path(model, states_i, seed_index, num_seeds, sampler: str = "ddim"):
+    """
+    Samples an unconditioned policy over one whole market path with a fixed latent per day.
+
+    All T days are still sampled in one batch (fast), but every day gets the same starting
+    noise: row `seed_index` of the fixed seed-42 latents for `num_seeds` rows. This is exactly
+    the latent the conditioned rollout gives market seed `seed_index` on every day, so both
+    policy families see identical starting noise and differ only in the wallet input.
+
+    Args:
+        model (PortDiff): Unconditioned diffusion policy.
+        states_i (torch.Tensor): Market windows for one seed, shape (T, window, n_assets).
+        seed_index (int): Index of this market seed among the evaluated seeds.
+        num_seeds (int): Number of evaluated seeds (batch size of the conditioned rollout).
+        sampler (str): "ddim" or "ddpm_det".
+
+    Returns:
+        torch.Tensor: Portfolio weights of shape (T, action_dim).
+    """
+    action_dim = model.denoiser.net[-1].out_features
+    latent = fixed_initial_latents(num_seeds, action_dim, states_i.device)[seed_index]
+    noise = latent.unsqueeze(0).expand(states_i.shape[0], -1)
+    return model.sample(states_i, sampler=sampler, initial_noise=noise)
+
+
 def rollout_conditioned_batch(model, batch_states, batch_returns, device, sampler: str = "ddim"):
     """
     Executes closed-loop autoregressive rollout in parallel across independent market seeds.
@@ -263,7 +306,7 @@ def rollout_conditioned_batch(model, batch_states, batch_returns, device, sample
     return weights_tensor.cpu().numpy()
 
 
-def run_final_evaluation(num_seeds=30, start_seed=9000):
+def run_final_evaluation(num_seeds=30, start_seed=9000, device_name: str = "cpu"):
     """
     Executes an out-of-sample statistical comparison across 30 unseen market seeds
     evaluating Classical Markowitz, Cost-Aware Markowitz, Unconditioned IL/RL,
@@ -273,7 +316,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         num_seeds (int): Number of independent market seeds to evaluate.
         start_seed (int): Base random seed ensuring unseen evaluation paths.
     """
-    config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device = load_evaluation_environment()
+    config, hmm, sim_model, expert, expert_tc, il_uncond, rl_uncond, il_cond, rl_cond, device = load_evaluation_environment(device_name)
     logger = setup_logger("Final_Evaluation")
 
     cost_c = config["expert"]["transaction_cost"]
@@ -297,7 +340,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         "rl_conditioned_det": "RL Cond (Det)",
     }
 
-    results = {k: [] for k in policy_keys}
+    results: dict[str, list[dict]] = {k: [] for k in policy_keys}
     results["il_cond_ddpm_det"] = []
 
     logger.info(f"Simulating {num_seeds} unseen market paths (seeds {start_seed} to {start_seed + num_seeds - 1})...")
@@ -347,8 +390,8 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     for i in range(num_seeds):
         states_i = batch_states[i]
         with torch.no_grad():
-            w_il_det = il_uncond.sample(states_i, sampler="ddim").cpu().numpy()
-            w_rl_det = rl_uncond.sample(states_i, sampler="ddim").cpu().numpy()
+            w_il_det = sample_unconditioned_path(il_uncond, states_i, i, num_seeds, sampler="ddim").cpu().numpy()
+            w_rl_det = sample_unconditioned_path(rl_uncond, states_i, i, num_seeds, sampler="ddim").cpu().numpy()
         results["il_unconditioned_det"].append(compute_portfolio_metrics(w_il_det, all_actual_returns[i], cost_c=cost_c))
         results["rl_unconditioned_det"].append(compute_portfolio_metrics(w_rl_det, all_actual_returns[i], cost_c=cost_c))
 
@@ -381,7 +424,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
     }
 
     all_keys = policy_keys + ["il_cond_ddpm_det"]
-    summary = {}
+    summary: dict[str, dict] = {}
     for model_key in all_keys:
         summary[model_key] = {}
         for m in metrics_list:
@@ -435,7 +478,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
         ("IL Cond vs Markowitz", "il_conditioned_det", "markowitz"),
     ]
 
-    paired_summary = {}
+    paired_summary: dict[str, dict] = {}
     print("=" * 95)
     print("PAIRED STATISTICAL DIFFERENCES & 95% CONFIDENCE INTERVALS (30 UNSEEN SEEDS)")
     print("=" * 95)
@@ -487,4 +530,10 @@ def run_final_evaluation(num_seeds=30, start_seed=9000):
 
 
 if __name__ == "__main__":
-    run_final_evaluation()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Final out-of-sample evaluation.")
+    parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
+                        help="cpu is the default: reproducible, and MPS fails on macOS 27 with torch 2.13")
+    args = parser.parse_args()
+    run_final_evaluation(device_name=args.device)

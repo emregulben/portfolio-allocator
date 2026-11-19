@@ -2,9 +2,11 @@ import os
 import sys
 import pytest
 import numpy as np
+import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.final_evaluation import compute_portfolio_metrics
+from scripts.final_evaluation import compute_portfolio_metrics, sample_unconditioned_path
+from agents.diffusion import MeanCovMLPDenoiser, PortDiff
 
 
 def test_metrics_static_portfolio_zero_turnover():
@@ -82,3 +84,64 @@ def test_metrics_sortino_downside_isolation():
 
     # Sortino should be massive because there are zero downside returns
     assert metrics["net_sortino"] > metrics["net_sharpe"] * 10, "Sortino should be vastly higher than Sharpe for purely positive returns."
+
+
+def _small_uncond_model():
+    torch.manual_seed(0)
+    denoiser = MeanCovMLPDenoiser(n_assets=4, action_dim=5, hidden_dim=32, condition_on_prev_weights=False)
+    model = PortDiff(denoiser=denoiser, num_timesteps=10, beta_schedule="linear")
+    return model.eval()
+
+
+def test_unconditioned_path_same_market_every_day_gives_same_portfolio():
+    """
+    Sampler confound check: if the market looks the same on every day, a deterministic
+    policy must pick the same portfolio every day (zero turnover). Before the fix, each
+    day got a different starting noise, so the portfolio jittered with no market reason.
+    """
+    model = _small_uncond_model()
+    one_day = torch.randn(1, 60, 4) * 0.02
+    states_i = one_day.repeat(6, 1, 1)           # 6 days, identical market
+
+    with torch.no_grad():
+        w = sample_unconditioned_path(model, states_i, seed_index=0, num_seeds=3, sampler="ddim")
+    assert torch.allclose(w, w[:1].expand_as(w), atol=1e-6)
+
+
+def test_unconditioned_path_uses_same_noise_as_conditioned_rollout():
+    """
+    Fair comparison: market seed i must get the same starting noise as in the conditioned
+    rollout, which samples all seeds in one batch (row i = seed i) every day.
+    """
+    model = _small_uncond_model()
+    num_seeds = 3
+    one_day_per_seed = torch.randn(num_seeds, 60, 4) * 0.02
+
+    with torch.no_grad():
+        batch_style = model.sample(one_day_per_seed, sampler="ddim")   # like rollout_conditioned_batch
+        for i in range(num_seeds):
+            path_style = sample_unconditioned_path(
+                model, one_day_per_seed[i:i + 1], seed_index=i, num_seeds=num_seeds, sampler="ddim"
+            )
+            assert torch.allclose(path_style[0], batch_style[i], atol=1e-6)
+
+
+@pytest.mark.parametrize("bad, why", [
+    ("zeros", "a failed GPU step can return all-zero weights"),
+    ("nan", "a failed GPU step can return NaN weights"),
+    ("negative", "short positions are not allowed"),
+])
+def test_metrics_refuse_invalid_weights(bad, why):
+    """Invalid portfolios must stop the evaluation instead of being saved as results."""
+    T, action_dim = 10, 3
+    weights = np.full((T, action_dim), 1.0 / action_dim)
+    if bad == "zeros":
+        weights[4] = 0.0
+    elif bad == "nan":
+        weights[4, 1] = np.nan
+    else:
+        weights[4] = [1.2, -0.2, 0.0]
+    returns = np.zeros((T, action_dim))
+
+    with pytest.raises(ValueError, match="Invalid portfolio weights"):
+        compute_portfolio_metrics(weights, returns, cost_c=0.0005)

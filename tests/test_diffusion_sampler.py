@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from agents.diffusion import MeanCovMLPDenoiser, PortDiff
+from agents.diffusion import MeanCovMLPDenoiser, PortDiff, fixed_initial_latents
 
 
 @pytest.fixture
@@ -98,3 +98,30 @@ def test_invalid_sampler_raises(test_environment):
 
     with pytest.raises(ValueError, match="Unknown sampler"):
         model.sample(state, sampler="unsupported_sampler")
+
+
+def test_default_noise_equals_fixed_initial_latents(test_environment):
+    """Passing the fixed seed-42 latents by hand must give the same weights as the default."""
+    model, state = test_environment
+    noise = fixed_initial_latents(state.shape[0], 5, state.device)
+
+    for sampler_name in ["ddim", "ddpm_det"]:
+        default = model.sample(state, sampler=sampler_name)
+        explicit = model.sample(state, sampler=sampler_name, initial_noise=noise)
+        assert torch.equal(default, explicit)
+
+
+def test_same_state_and_same_noise_give_same_weights(test_environment):
+    """Same market and same starting noise in every row must give identical rows."""
+    model, state = test_environment
+    states = state[:1].repeat(4, 1, 1)          # 4 identical markets
+    noise = torch.randn(1, 5).repeat(4, 1)      # 4 identical starting noises
+
+    weights = model.sample(states, sampler="ddim", initial_noise=noise)
+    assert torch.allclose(weights, weights[:1].expand_as(weights))
+
+
+def test_initial_noise_with_wrong_shape_raises(test_environment):
+    model, state = test_environment
+    with pytest.raises(ValueError, match="initial_noise"):
+        model.sample(state, sampler="ddim", initial_noise=torch.randn(3, 5))
