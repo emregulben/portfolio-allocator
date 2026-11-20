@@ -29,6 +29,31 @@ def fixed_initial_latents(num_rows: int, action_dim: int, device: torch.device) 
     )
 
 
+def sample_unconditioned_path(model, states_i, seed_index, num_seeds, sampler: str = "ddim"):
+    """
+    Samples an unconditioned policy over one whole market path with a fixed latent per day.
+
+    All T days are still sampled in one batch (fast), but every day gets the same starting
+    noise: row `seed_index` of the fixed seed-42 latents for `num_seeds` rows. This is exactly
+    the latent the conditioned rollout gives market seed `seed_index` on every day, so both
+    policy families see identical starting noise and differ only in the wallet input.
+
+    Args:
+        model (PortDiff): Unconditioned diffusion policy.
+        states_i (torch.Tensor): Market windows for one seed, shape (T, window, n_assets).
+        seed_index (int): Index of this market seed among the evaluated seeds.
+        num_seeds (int): Number of evaluated seeds (batch size of the conditioned rollout).
+        sampler (str): "ddim" or "ddpm_det".
+
+    Returns:
+        torch.Tensor: Portfolio weights of shape (T, action_dim).
+    """
+    action_dim = model.denoiser.net[-1].out_features
+    latent = fixed_initial_latents(num_seeds, action_dim, states_i.device)[seed_index]
+    noise = latent.unsqueeze(0).expand(states_i.shape[0], -1)
+    return model.sample(states_i, sampler=sampler, initial_noise=noise)
+
+
 def map_to_feasible_portfolio(action_t: torch.Tensor, max_weight: float = 0.20) -> torch.Tensor:
     """Enforces Markowitz constraints by safely parking illegal excess into Cash."""
     w = torch.clamp(action_t, min=0.0)

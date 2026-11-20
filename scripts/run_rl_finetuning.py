@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator.loader import MarketDataLoader
 from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
-from agents.diffusion import MLPDenoiser, MeanCovMLPDenoiser, PortDiff, map_to_feasible_portfolio
+from agents.diffusion import MLPDenoiser, MeanCovMLPDenoiser, PortDiff, map_to_feasible_portfolio, sample_unconditioned_path
 from agents.replay_buffer import AWRReplayBuffer, ConditionedAWRReplayBuffer
 from agents.awr_trainer import PortDiffAWRTrainer
 
@@ -75,6 +75,19 @@ def compute_daily_utility(actions, returns, states, gamma=2.0, cost_c=0.0005, pr
 
     return portfolio_return - (gamma / 2.0) * portfolio_variance - cost_c * turnover
 
+# Market paths sampled together in one conditioned rollout batch.
+ROLLOUT_BATCH = 20
+
+def sample_clean_actions_unconditioned(model, states, traj):
+    """
+    Clean actions of the unconditioned policy for one simulated market path.
+
+    Every day of path `traj` starts from the same latent: the one conditioned RL training
+    gives that path (row traj % ROLLOUT_BATCH of its batch). Without this, each day got a
+    new latent, so the clean policy jumped around and paid fake turnover costs.
+    """
+    return sample_unconditioned_path(model, states, traj % ROLLOUT_BATCH, ROLLOUT_BATCH)
+
 def run_rl_unconditioned():
     logger = setup_logger("RL_Finetuning_Unconditioned")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -91,7 +104,8 @@ def run_rl_unconditioned():
     
     loader = MarketDataLoader(tickers=[market_ticker] + stock_tickers, 
                               start_date=config["data"]["start_date"], 
-                              end_date=config["data"]["end_date"])
+                              end_date=config["data"]["end_date"],
+                              cache_path=os.path.join(root_dir, config["data"]["snapshot_path"]))
     data = loader.fetch_data()
     
     hmm = HybridJumpsHMM(n_states=config["hmm"]["n_states"], emission_dist="gaussian")
@@ -175,7 +189,7 @@ def run_rl_unconditioned():
             
             # Predict the clean actions using the frozen model
             with torch.no_grad():
-                clean_actions = model.sample(states)
+                clean_actions = sample_clean_actions_unconditioned(model, states, traj)
                 
             # Inject Exploration Noise and Enforce Feasibility
             noise = torch.randn_like(clean_actions) * 0.05
@@ -291,7 +305,8 @@ def run_rl_conditioned():
     loader = MarketDataLoader(
         tickers=[market_ticker] + stock_tickers, 
         start_date=config["data"]["start_date"], 
-        end_date=config["data"]["end_date"]
+        end_date=config["data"]["end_date"],
+        cache_path=os.path.join(root_dir, config["data"]["snapshot_path"])
     )
     data = loader.fetch_data()
     
@@ -340,7 +355,7 @@ def run_rl_conditioned():
     cost_c = config["expert"]["transaction_cost"]
     
     total_trajs = rl_cfg["trajectories_per_iteration"]
-    batch_trajs_size = 20  # Parallelize rollout across market trajectories on MPS/GPU
+    batch_trajs_size = ROLLOUT_BATCH  # Parallelize rollout across market trajectories
     chunk_size = 252       # 1 Trading Year
     
     # 4. Main Conditioned AWR Fine-Tuning Loop
