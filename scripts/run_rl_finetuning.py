@@ -1,3 +1,4 @@
+import argparse
 import os
 import yaml
 import torch
@@ -88,14 +89,15 @@ def sample_clean_actions_unconditioned(model, states, traj):
     """
     return sample_unconditioned_path(model, states, traj % ROLLOUT_BATCH, ROLLOUT_BATCH)
 
-def run_rl_unconditioned():
+def run_rl_unconditioned(device_name: str = "cpu"):
     logger = setup_logger("RL_Finetuning_Unconditioned")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     with open(os.path.join(root_dir, "config.yaml"), "r") as f:
         config = yaml.safe_load(f)
         
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(device_name)
+    torch.manual_seed(config["rl"]["seed"])
     
     # 1. Setup Pure Gaussian Simulator
     logger.info("Initializing Pure Gaussian Simulator...")
@@ -140,7 +142,8 @@ def run_rl_unconditioned():
         learning_rate=rl_cfg["learning_rate"], 
         batch_size=rl_cfg["batch_size"], 
         beta=rl_cfg["beta"], 
-        weight_clip=rl_cfg["weight_clip"]
+        weight_clip=rl_cfg["weight_clip"],
+        device=device_name
     )
     
     window = config["expert"]["rolling_window"]
@@ -288,14 +291,15 @@ def run_rl_unconditioned():
     torch.save(model.state_dict(), rl_model_path)
     logger.info(f"Saved RL Winner to {rl_model_path}!")
 
-def run_rl_conditioned():
+def run_rl_conditioned(device_name: str = "cpu"):
     logger = setup_logger("RL_Conditioned_Finetuning")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     with open(os.path.join(root_dir, "config.yaml"), "r") as f:
         config = yaml.safe_load(f)
         
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device(device_name)
+    torch.manual_seed(config["rl"]["seed"])
     
     # 1. Setup Market Simulator
     logger.info("Initializing Pure Gaussian Simulator...")
@@ -346,7 +350,8 @@ def run_rl_conditioned():
         learning_rate=rl_cfg["learning_rate"], 
         batch_size=rl_cfg["batch_size"], 
         beta=rl_cfg["beta"], 
-        weight_clip=rl_cfg["weight_clip"]
+        weight_clip=rl_cfg["weight_clip"],
+        device=device_name
     )
     
     window = config["expert"]["rolling_window"]
@@ -535,4 +540,14 @@ def run_rl_conditioned():
 run_rl = run_rl_unconditioned
 
 if __name__ == "__main__":
-    run_rl_conditioned()
+    parser = argparse.ArgumentParser(description="AWR fine-tuning of an IL policy.")
+    parser.add_argument("--model", choices=["conditioned", "unconditioned"], default="conditioned",
+                        help="conditioned: il_conditioned.pth -> rl_conditioned.pth; "
+                             "unconditioned: il_winner.pth -> rl_winner.pth")
+    parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
+                        help="CPU is the default: it is reproducible, and MPS fails after macOS 27.2.")
+    args = parser.parse_args()
+    if args.model == "conditioned":
+        run_rl_conditioned(device_name=args.device)
+    else:
+        run_rl_unconditioned(device_name=args.device)

@@ -1,3 +1,9 @@
+"""
+Trains the unconditioned IL policy, saves it to il_winner.pth and runs a blind MAE test.
+
+The architecture and training settings come from the `il` section of config.yaml.
+"""
+import argparse
 import os
 import sys
 import yaml
@@ -12,10 +18,12 @@ from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
 from experts.markowitz import MarkowitzExpert
 from agents.dataset import PortfolioDataset
-from agents.diffusion import MeanCovMLPDenoiser, PortDiff
+from agents.diffusion import build_il_model
 from agents.trainer import PortDiffTrainer
 from torch.utils.data import ConcatDataset, DataLoader
 from simulator.logger import setup_logger
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def setup_pure_gaussian_environment(config):
     """Initializes the market simulators strictly without jump crashes."""
@@ -25,7 +33,8 @@ def setup_pure_gaussian_environment(config):
     loader = MarketDataLoader(
         tickers=[market_ticker] + stock_tickers,
         start_date=config["data"]["start_date"], 
-        end_date=config["data"]["end_date"]
+        end_date=config["data"]["end_date"],
+        cache_path=os.path.join(ROOT_DIR, config["data"]["snapshot_path"])
     )
     data = loader.fetch_data()
     
@@ -78,7 +87,8 @@ def generate_combined_dataset(config, hmm, sim_model, n_seeds=5, seed_offset=0):
         
     return ConcatDataset(all_datasets)
 
-if __name__ == "__main__":
+def train_unconditioned_il(device_name: str = "cpu"):
+    """Trains il_winner.pth with the config.yaml settings, then runs the blind MAE test."""
     logger = setup_logger("Final_IL_Evaluation")
     
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,32 +106,25 @@ if __name__ == "__main__":
     val_dataset = generate_combined_dataset(config, hmm, sim_model, n_seeds=5, seed_offset=5)
     
     n_assets = len(config["data"]["stock_tickers"])
-    action_dim = n_assets + 1
+    il_cfg = config["il"]
     
-    # 2. Model Initialization
-    logger.info("Initializing the Winner Architecture: MeanCovMLPDenoiser (1024 Dims)...")
-    denoiser = MeanCovMLPDenoiser(
-        n_assets=n_assets,
-        action_dim=action_dim,
-        hidden_dim=1024
-    )
-    
-    model = PortDiff(
-        denoiser=denoiser, 
-        num_timesteps=100, 
-        beta_schedule="linear"
-    )
+    # 2. Model Initialization (grid search winner, defined in config.yaml)
+    logger.info(f"Initializing the Winner Architecture: MeanCovMLPDenoiser ({il_cfg['hidden_dim']} Dims)...")
+    torch.manual_seed(il_cfg["seed"])
+    model = build_il_model(il_cfg, n_assets, conditioned=False)
     
     trainer = PortDiffTrainer(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset, 
-        batch_size=64
+        learning_rate=il_cfg["learning_rate"],
+        batch_size=il_cfg["batch_size"],
+        device=device_name
     )
     
     # 3. Execution
     logger.info("Training the Final Model...")
-    trained_model = trainer.train(epochs=15)
+    trained_model = trainer.train(epochs=il_cfg["epochs"])
     
     # Freeze model weights to prevent parameter updates during evaluation
     logger.info("\nTraining Complete! Permanently freezing model weights for blind evaluation...")
@@ -164,3 +167,10 @@ if __name__ == "__main__":
     logger.info("="*50)
     logger.info(f"FINAL BLIND TEST MAE (5 UNSEEN MARKETS): {final_blind_mae:.4f}")
     logger.info("="*50)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train the unconditioned IL policy (il_winner.pth).")
+    parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
+                        help="CPU is the default: it is reproducible, and MPS fails after macOS 27.2.")
+    train_unconditioned_il(device_name=parser.parse_args().device)

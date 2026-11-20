@@ -473,3 +473,33 @@ class PortDiff(nn.Module):
         # Custom Feasibility Mapping: Enforce Markowitz constraints
         final_weights = map_to_feasible_portfolio(action_t, max_weight=0.20)
         return final_weights
+
+
+def build_il_model(il_cfg: dict, n_assets: int, conditioned: bool = False) -> "PortDiff":
+    """
+    Builds the IL diffusion policy from the `il` section of config.yaml.
+
+    Both IL training scripts use this, so the config is the single place that
+    defines the architecture of the unconditioned and the conditioned model.
+
+    Args:
+        il_cfg: The `il` section of config.yaml.
+        n_assets: Number of risky assets (cash is added as one extra output).
+        conditioned: If True, the denoiser also sees the current portfolio weights.
+
+    Returns:
+        An untrained PortDiff model.
+    """
+    denoiser = MeanCovMLPDenoiser(
+        n_assets=n_assets,
+        action_dim=n_assets + 1,
+        hidden_dim=il_cfg["hidden_dim"],
+        t_dim=il_cfg["t_dim"],
+        use_layernorm=il_cfg["use_layernorm"],
+        condition_on_prev_weights=conditioned,
+    )
+    return PortDiff(
+        denoiser=denoiser,
+        num_timesteps=il_cfg["num_timesteps"],
+        beta_schedule=il_cfg["beta_schedule"],
+    )

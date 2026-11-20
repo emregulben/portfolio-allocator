@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 
 class PortDiffTrainer:
-    def __init__(self, model, train_dataset, val_dataset, learning_rate=1e-3, batch_size=64):
+    def __init__(self, model, train_dataset, val_dataset, learning_rate=1e-3, batch_size=64, device=None):
         """
         Handles the PyTorch training loop for the PortDiff model.
         
@@ -14,11 +14,15 @@ class PortDiffTrainer:
             val_dataset (Dataset): The validation dataset.
             learning_rate (float): Adam optimizer learning rate.
             batch_size (int): Number of samples per batch.
+            device (str, optional): "cpu" or "mps". If None, picks a device automatically.
         """
-        # Hardware acceleration: Automatically uses Apple Silicon (MPS), NVIDIA (CUDA), or CPU
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if torch.backends.mps.is_available():
-            self.device = torch.device("mps")
+        # Use the requested device; otherwise pick MPS, CUDA or CPU automatically
+        if device is not None:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.backends.mps.is_available():
+                self.device = torch.device("mps")
             
         self.model = model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)

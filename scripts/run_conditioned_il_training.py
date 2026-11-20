@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import yaml
@@ -12,9 +13,11 @@ from simulator.hmm import HybridJumpsHMM
 from simulator.single_index import SingleIndexModel
 from experts.markowitz import MarkowitzExpert
 from agents.dataset import ConditionedPortfolioDataset
-from agents.diffusion import MeanCovMLPDenoiser, PortDiff
+from agents.diffusion import build_il_model
 from agents.trainer import PortDiffTrainer
 from simulator.logger import setup_logger
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def setup_simulation_environment(config):
@@ -25,7 +28,8 @@ def setup_simulation_environment(config):
     loader = MarketDataLoader(
         tickers=[market_ticker] + stock_tickers,
         start_date=config["data"]["start_date"],
-        end_date=config["data"]["end_date"]
+        end_date=config["data"]["end_date"],
+        cache_path=os.path.join(ROOT_DIR, config["data"]["snapshot_path"])
     )
     data = loader.fetch_data()
 
@@ -75,7 +79,7 @@ def generate_conditioned_dataset(config, hmm, sim_model, n_seeds=5, seed_offset=
     return ConcatDataset(all_datasets)
 
 
-def train_conditioned_il():
+def train_conditioned_il(device_name: str = "cpu"):
     logger = setup_logger("Conditioned_IL_Training")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -93,32 +97,25 @@ def train_conditioned_il():
     val_dataset = generate_conditioned_dataset(config, hmm, sim_model, n_seeds=5, seed_offset=5)
 
     n_assets = len(config["data"]["stock_tickers"])
-    action_dim = n_assets + 1
+    il_cfg = config["il"]
 
-    # 2. Conditioned Model Architecture
-    logger.info("Initializing conditioned MeanCovMLPDenoiser (1024 dims)...")
-    denoiser = MeanCovMLPDenoiser(
-        n_assets=n_assets,
-        action_dim=action_dim,
-        hidden_dim=1024,
-        condition_on_prev_weights=True
-    )
-    model = PortDiff(
-        denoiser=denoiser,
-        num_timesteps=100,
-        beta_schedule="linear"
-    )
+    # 2. Conditioned Model Architecture (same settings as the unconditioned winner)
+    logger.info(f"Initializing conditioned MeanCovMLPDenoiser ({il_cfg['hidden_dim']} dims)...")
+    torch.manual_seed(il_cfg["seed"])
+    model = build_il_model(il_cfg, n_assets, conditioned=True)
 
     trainer = PortDiffTrainer(
         model=model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        batch_size=64
+        learning_rate=il_cfg["learning_rate"],
+        batch_size=il_cfg["batch_size"],
+        device=device_name
     )
 
     # 3. Training Loop
-    logger.info("Training conditioned model for 15 epochs...")
-    trained_model = trainer.train(epochs=15)
+    logger.info(f"Training conditioned model for {il_cfg['epochs']} epochs...")
+    trained_model = trainer.train(epochs=il_cfg["epochs"])
     trained_model.eval()
 
     # 4. Save Checkpoint
@@ -147,4 +144,7 @@ def train_conditioned_il():
 
 
 if __name__ == "__main__":
-    train_conditioned_il()
+    parser = argparse.ArgumentParser(description="Train the conditioned IL policy (il_conditioned.pth).")
+    parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
+                        help="CPU is the default: it is reproducible, and MPS fails after macOS 27.2.")
+    train_conditioned_il(device_name=parser.parse_args().device)

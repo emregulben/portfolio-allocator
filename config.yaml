@@ -51,17 +51,23 @@ expert:
 # 4. Imitation Learning Configuration (PortDiff)
 # ---------------------------------------------------------
 il:
+  # Winner of the IL grid search (run_il_grid_search.py), used to train both
+  # il_winner.pth (final_il_evaluation.py) and il_conditioned.pth
+  # (run_conditioned_il_training.py). tests/test_il_config.py checks these values
+  # against the saved models.
   # Model Architecture
-  hidden_dim: 256
+  hidden_dim: 1024
   t_dim: 16
-  use_layernorm: true
+  use_layernorm: false
   # Diffusion Physics
   num_timesteps: 100
-  beta_schedule: "cosine"
+  beta_schedule: "linear"
   # Training Hyperparameters
   batch_size: 64
-  learning_rate: 0.0001
-  epochs: 150
+  learning_rate: 0.001
+  epochs: 15
+  # Fixes the random starting weights and batch order, so a retrain gives the same model
+  seed: 0
 
 # ---------------------------------------------------------
 # 5. Reinforcement Learning Configuration (AWR)
@@ -80,3 +86,5 @@ rl:
   epochs_per_iteration: 5
   # How many trajectories the agent simulates per iteration to gather experience
   trajectories_per_iteration: 100
+  # Fixes the exploration noise and batch order, so a retrain gives the same model
+  seed: 0

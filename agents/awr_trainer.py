@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 
 class PortDiffAWRTrainer:
-    def __init__(self, model, replay_buffer, learning_rate=1e-4, batch_size=256, beta=0.05, weight_clip=20.0):
+    def __init__(self, model, replay_buffer, learning_rate=1e-4, batch_size=256, beta=0.05, weight_clip=20.0, device=None):
         """
         Handles the PyTorch training loop for Reinforcement Learning (AWR).
         
@@ -15,10 +15,14 @@ class PortDiffAWRTrainer:
             beta (float): The temperature parameter. Controls how strictly we filter advantages.
                           Lower beta = strictly only copies the absolute best actions.
             weight_clip (float): Maximum allowed weight to prevent gradient explosion.
+            device (str, optional): "cpu" or "mps". If None, picks a device automatically.
         """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if torch.backends.mps.is_available():
-            self.device = torch.device("mps")
+        if device is not None:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.backends.mps.is_available():
+                self.device = torch.device("mps")
             
         self.model = model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
