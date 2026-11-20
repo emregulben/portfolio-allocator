@@ -427,7 +427,7 @@ def run_final_evaluation(num_seeds=30, start_seed=9000, device_name: str = "cpu"
     divider = "-" * len(header)
 
     print("\n" + divider)
-    print("OUT-OF-SAMPLE EVALUATION RESULTS (30 UNSEEN MARKET SEEDS)")
+    print(f"OUT-OF-SAMPLE EVALUATION RESULTS ({num_seeds} UNSEEN MARKET SEEDS)")
     print(divider)
     print(header)
     print(divider)
@@ -521,5 +521,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Final out-of-sample evaluation.")
     parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
                         help="cpu is the default: reproducible, and MPS fails on macOS 27 with torch 2.13")
+    parser.add_argument("--num-seeds", type=int, default=30,
+                        help="number of unseen market seeds, starting at seed 9000")
     args = parser.parse_args()
-    run_final_evaluation(device_name=args.device)
+    run_final_evaluation(num_seeds=args.num_seeds, device_name=args.device)

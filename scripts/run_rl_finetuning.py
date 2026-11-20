@@ -89,7 +89,7 @@ def sample_clean_actions_unconditioned(model, states, traj):
     """
     return sample_unconditioned_path(model, states, traj % ROLLOUT_BATCH, ROLLOUT_BATCH)
 
-def run_rl_unconditioned(device_name: str = "cpu"):
+def run_rl_unconditioned(device_name: str = "cpu", seed: int | None = None):
     logger = setup_logger("RL_Finetuning_Unconditioned")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
@@ -97,7 +97,10 @@ def run_rl_unconditioned(device_name: str = "cpu"):
         config = yaml.safe_load(f)
         
     device = torch.device(device_name)
-    torch.manual_seed(config["rl"]["seed"])
+    # Training seed: the --seed option, otherwise rl.seed from config.yaml
+    rl_seed = config["rl"]["seed"] if seed is None else seed
+    torch.manual_seed(rl_seed)
+    logger.info(f"Device: {device} | RL training seed: {rl_seed}")
     
     # 1. Setup Pure Gaussian Simulator
     logger.info("Initializing Pure Gaussian Simulator...")
@@ -291,7 +294,7 @@ def run_rl_unconditioned(device_name: str = "cpu"):
     torch.save(model.state_dict(), rl_model_path)
     logger.info(f"Saved RL Winner to {rl_model_path}!")
 
-def run_rl_conditioned(device_name: str = "cpu"):
+def run_rl_conditioned(device_name: str = "cpu", seed: int | None = None):
     logger = setup_logger("RL_Conditioned_Finetuning")
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
@@ -299,7 +302,10 @@ def run_rl_conditioned(device_name: str = "cpu"):
         config = yaml.safe_load(f)
         
     device = torch.device(device_name)
-    torch.manual_seed(config["rl"]["seed"])
+    # Training seed: the --seed option, otherwise rl.seed from config.yaml
+    rl_seed = config["rl"]["seed"] if seed is None else seed
+    torch.manual_seed(rl_seed)
+    logger.info(f"Device: {device} | RL training seed: {rl_seed}")
     
     # 1. Setup Market Simulator
     logger.info("Initializing Pure Gaussian Simulator...")
@@ -546,8 +552,10 @@ if __name__ == "__main__":
                              "unconditioned: il_winner.pth -> rl_winner.pth")
     parser.add_argument("--device", choices=["cpu", "mps"], default="cpu",
                         help="CPU is the default: it is reproducible, and MPS fails after macOS 27.2.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="training seed (default: rl.seed in config.yaml)")
     args = parser.parse_args()
     if args.model == "conditioned":
-        run_rl_conditioned(device_name=args.device)
+        run_rl_conditioned(device_name=args.device, seed=args.seed)
     else:
-        run_rl_unconditioned(device_name=args.device)
+        run_rl_unconditioned(device_name=args.device, seed=args.seed)
