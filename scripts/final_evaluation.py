@@ -18,6 +18,18 @@ from experts.markowitz import MarkowitzExpert
 from agents.diffusion import MeanCovMLPDenoiser, PortDiff, map_to_feasible_portfolio, fixed_initial_latents
 
 
+# Paired tests (name, model A, model B); A - B is tested across matched market seeds.
+PAIRED_COMPARISONS = [
+    ("RL Cond vs IL Cond", "rl_conditioned_det", "il_conditioned_det"),
+    ("RL Cond vs Markowitz TC", "rl_conditioned_det", "markowitz_tc"),
+    ("IL Cond vs Markowitz TC", "il_conditioned_det", "markowitz_tc"),
+    ("IL Cond vs Markowitz", "il_conditioned_det", "markowitz"),
+    # Contribution 1: effect of the wallet input, same training method, same latents
+    ("IL Cond vs IL Uncond", "il_conditioned_det", "il_unconditioned_det"),
+    ("RL Cond vs RL Uncond", "rl_conditioned_det", "rl_unconditioned_det"),
+]
+
+
 def setup_logger(name):
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
@@ -471,16 +483,11 @@ def run_final_evaluation(num_seeds=30, start_seed=9000, device_name: str = "cpu"
     print(rob_div + "\n")
 
     # 8. Paired Differences & 95% Confidence Intervals
-    comparisons = [
-        ("RL Cond vs IL Cond", "rl_conditioned_det", "il_conditioned_det"),
-        ("RL Cond vs Markowitz TC", "rl_conditioned_det", "markowitz_tc"),
-        ("IL Cond vs Markowitz TC", "il_conditioned_det", "markowitz_tc"),
-        ("IL Cond vs Markowitz", "il_conditioned_det", "markowitz"),
-    ]
+    comparisons = PAIRED_COMPARISONS
 
     paired_summary: dict[str, dict] = {}
     print("=" * 95)
-    print("PAIRED STATISTICAL DIFFERENCES & 95% CONFIDENCE INTERVALS (30 UNSEEN SEEDS)")
+    print(f"PAIRED STATISTICAL DIFFERENCES & 95% CONFIDENCE INTERVALS ({num_seeds} UNSEEN SEEDS)")
     print("=" * 95)
 
     for comp_name, key_a, key_b in comparisons:
@@ -506,7 +513,11 @@ def run_final_evaluation(num_seeds=30, start_seed=9000, device_name: str = "cpu"
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_path = os.path.join(root_dir, "final_evaluation_results.json")
     save_data = {
+        "num_seeds": num_seeds,
+        "start_seed": start_seed,
         "summary": summary,
+        # Per-seed metrics, so new paired tests can be computed without rerunning.
+        "per_seed": results,
         "paired_statistics": {
             comp_name: {
                 m: {

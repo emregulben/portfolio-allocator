@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.final_evaluation import compute_portfolio_metrics, sample_unconditioned_path
+from scripts.final_evaluation import compute_portfolio_metrics, sample_unconditioned_path, PAIRED_COMPARISONS
 from agents.diffusion import MeanCovMLPDenoiser, PortDiff
 
 
@@ -145,3 +145,11 @@ def test_metrics_refuse_invalid_weights(bad, why):
 
     with pytest.raises(ValueError, match="Invalid portfolio weights"):
         compute_portfolio_metrics(weights, returns, cost_c=0.0005)
+
+
+
+def test_wallet_effect_is_tested_directly():
+    """Contribution 1 (the wallet input) needs Cond vs Uncond tests for both IL and RL."""
+    pairs = {(a, b) for _, a, b in PAIRED_COMPARISONS}
+    assert ("il_conditioned_det", "il_unconditioned_det") in pairs
+    assert ("rl_conditioned_det", "rl_unconditioned_det") in pairs
